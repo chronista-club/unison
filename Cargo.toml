@@ -13,7 +13,7 @@ authors = ["Mako<mito@chronista.club>"]
 license = "MIT"
 homepage = "https://github.com/chronista-club/unison"
 repository = "https://github.com/chronista-club/unison"
-rust-version = "1.85"
+rust-version = "1.93"
 
 [workspace.dependencies]
 # Serialization
