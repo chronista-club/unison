@@ -111,10 +111,8 @@ impl QuicClient {
         if addr.contains(':') && !addr.contains('[') && !addr.contains('.') {
             // IPv6アドレスにデフォルトポートを追加
             let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
-            if let Ok(socket_addr) = addr_with_brackets.parse::<SocketAddr>() {
-                if let SocketAddr::V6(_) = socket_addr {
-                    return Ok(socket_addr);
-                }
+            if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
+                return Ok(socket_addr);
             }
         }
 
@@ -124,35 +122,35 @@ impl QuicClient {
         }
 
         // "localhost:port"形式の場合はIPv6ループバックを使用
-        if let Some(stripped) = addr.strip_prefix("localhost:") {
-            if let Ok(port) = stripped.parse::<u16>() {
-                return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
-            }
+        if let Some(stripped) = addr.strip_prefix("localhost:")
+            && let Ok(port) = stripped.parse::<u16>()
+        {
+            return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
         }
 
         // [IPv6]:port 形式を解析
-        if addr.starts_with('[') {
-            if let Some(end) = addr.find(']') {
-                let ipv6_str = &addr[1..end];
-                let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
-                    &addr[end + 2..]
-                } else {
-                    return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
-                };
+        if addr.starts_with('[')
+            && let Some(end) = addr.find(']')
+        {
+            let ipv6_str = &addr[1..end];
+            let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
+                &addr[end + 2..]
+            } else {
+                return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
+            };
 
-                let ipv6 = ipv6_str
-                    .parse::<std::net::Ipv6Addr>()
-                    .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
-                let port = if port_str.is_empty() {
-                    DEFAULT_PORT
-                } else {
-                    port_str
-                        .parse::<u16>()
-                        .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
-                };
+            let ipv6 = ipv6_str
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
+            let port = if port_str.is_empty() {
+                DEFAULT_PORT
+            } else {
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
+            };
 
-                return Ok(SocketAddr::from((ipv6, port)));
-            }
+            return Ok(SocketAddr::from((ipv6, port)));
         }
 
         // その他の場合はエラー
@@ -186,10 +184,10 @@ impl QuicClient {
                     Ok(data) => {
                         // フレームからProtocolMessageを復元
                         let frame_bytes = bytes::Bytes::from(data);
-                        if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes) {
-                            if let Ok(response) = ProtocolMessage::from_frame(&frame) {
-                                let _ = tx.send(response);
-                            }
+                        if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes)
+                            && let Ok(response) = ProtocolMessage::from_frame(&frame)
+                        {
+                            let _ = tx.send(response);
                         }
                     }
                     Err(e) => {
@@ -435,10 +433,8 @@ impl QuicServer {
         if addr.contains(':') && !addr.contains('[') {
             // IPv6アドレスにポートを追加
             let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
-            if let Ok(socket_addr) = addr_with_brackets.parse::<SocketAddr>() {
-                if let SocketAddr::V6(_) = socket_addr {
-                    return Ok(socket_addr);
-                }
+            if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
+                return Ok(socket_addr);
             }
         }
 
@@ -448,28 +444,28 @@ impl QuicServer {
         }
 
         // [IPv6]:port 形式を解析
-        if addr.starts_with('[') {
-            if let Some(end) = addr.find(']') {
-                let ipv6_str = &addr[1..end];
-                let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
-                    &addr[end + 2..]
-                } else {
-                    return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
-                };
+        if addr.starts_with('[')
+            && let Some(end) = addr.find(']')
+        {
+            let ipv6_str = &addr[1..end];
+            let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
+                &addr[end + 2..]
+            } else {
+                return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
+            };
 
-                let ipv6 = ipv6_str
-                    .parse::<std::net::Ipv6Addr>()
-                    .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
-                let port = if port_str.is_empty() {
-                    DEFAULT_PORT
-                } else {
-                    port_str
-                        .parse::<u16>()
-                        .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
-                };
+            let ipv6 = ipv6_str
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
+            let port = if port_str.is_empty() {
+                DEFAULT_PORT
+            } else {
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
+            };
 
-                return Ok(SocketAddr::from((ipv6, port)));
-            }
+            return Ok(SocketAddr::from((ipv6, port)));
         }
 
         // その他の場合はエラー
