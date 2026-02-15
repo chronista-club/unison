@@ -1,216 +1,226 @@
 use super::TypeRegistry;
 use std::collections::HashMap;
+use unison_kdl::KdlDeserialize;
 
 /// Parsed schema representation
-#[derive(Debug, Default, Clone, knuffel::Decode)]
+#[derive(Debug, Default, Clone, KdlDeserialize)]
+#[kdl(document)]
 pub struct ParsedSchema {
-    #[knuffel(child)]
+    #[kdl(child)]
     pub protocol: Option<Protocol>,
 
-    #[knuffel(children(name = "import"))]
+    #[kdl(children, name = "import")]
     pub imports: Vec<Import>,
 
-    #[knuffel(children(name = "message"))]
+    #[kdl(children, name = "message")]
     pub messages: Vec<Message>,
 
-    #[knuffel(children(name = "enum"))]
+    #[kdl(children, name = "enum")]
     pub enums: Vec<Enum>,
 
-    #[knuffel(children(name = "typedef"))]
+    #[kdl(children, name = "typedef")]
     pub typedefs: Vec<TypeDef>,
 }
 
 /// Import definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "import")]
 pub struct Import {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub path: String,
 }
 
 /// Protocol definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "protocol")]
 pub struct Protocol {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub version: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub namespace: Option<String>,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub description: Option<String>,
 
-    #[knuffel(children(name = "service"))]
+    #[kdl(children, name = "service")]
     pub services: Vec<Service>,
 
-    #[knuffel(children(name = "message"))]
+    #[kdl(children, name = "message")]
     pub messages: Vec<Message>,
 
-    #[knuffel(children(name = "enum"))]
+    #[kdl(children, name = "enum")]
     pub enums: Vec<Enum>,
 
-    #[knuffel(children(name = "channel"))]
+    #[kdl(children, name = "channel")]
     pub channels: Vec<Channel>,
 }
 
 /// Channel開始者
-#[derive(Debug, Clone, PartialEq, knuffel::DecodeScalar)]
+#[derive(Debug, Clone, PartialEq, KdlDeserialize)]
 pub enum ChannelFrom {
-    #[knuffel(rename = "client")]
+    #[kdl(rename = "client")]
     Client,
-    #[knuffel(rename = "server")]
+    #[kdl(rename = "server")]
     Server,
-    #[knuffel(rename = "either")]
+    #[kdl(rename = "either")]
     Either,
 }
 
 /// Channelの寿命
-#[derive(Debug, Clone, PartialEq, knuffel::DecodeScalar)]
+#[derive(Debug, Clone, PartialEq, KdlDeserialize)]
 pub enum ChannelLifetime {
-    #[knuffel(rename = "transient")]
+    #[kdl(rename = "transient")]
     Transient,
-    #[knuffel(rename = "persistent")]
+    #[kdl(rename = "persistent")]
     Persistent,
 }
 
 /// Channel内のメッセージ定義（名前付き）
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
 pub struct ChannelMessage {
     /// メッセージ名
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
     /// フィールド定義
-    #[knuffel(children(name = "field"))]
+    #[kdl(children, name = "field")]
     pub fields: Vec<Field>,
 }
 
 /// Channel定義（Stream-First APIのプリミティブ）
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "channel")]
 pub struct Channel {
     /// チャネル名
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
     /// 誰がStreamを開くか
-    #[knuffel(property)]
+    #[kdl(property)]
     pub from: ChannelFrom,
 
     /// Streamの寿命
-    #[knuffel(property)]
+    #[kdl(property)]
     pub lifetime: ChannelLifetime,
 
     /// 送信メッセージ型（opener視点）
-    #[knuffel(child)]
+    #[kdl(child)]
     pub send: Option<ChannelMessage>,
 
     /// 受信メッセージ型（opener視点）
-    #[knuffel(child)]
+    #[kdl(child)]
     pub recv: Option<ChannelMessage>,
 
     /// エラー型
-    #[knuffel(child)]
+    #[kdl(child)]
     pub error: Option<ChannelMessage>,
 }
 
 /// Service definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "service")]
 pub struct Service {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub description: Option<String>,
 
-    #[knuffel(children(name = "method"))]
+    #[kdl(children, name = "method")]
     pub methods: Vec<Method>,
 
-    #[knuffel(children(name = "stream"))]
+    #[kdl(children, name = "stream")]
     pub streams: Vec<Stream>,
 }
 
 /// RPC Method definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "method")]
 pub struct Method {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub description: Option<String>,
 
-    #[knuffel(child)]
+    #[kdl(child)]
     pub request: Option<MethodMessage>,
 
-    #[knuffel(child)]
+    #[kdl(child)]
     pub response: Option<MethodMessage>,
 }
 
 /// Method request/response definition (without name argument)
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
 pub struct MethodMessage {
-    #[knuffel(children(name = "field"))]
+    #[kdl(children, name = "field")]
     pub fields: Vec<Field>,
 }
 
 /// Streaming endpoint definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "stream")]
 pub struct Stream {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child)]
+    #[kdl(child)]
     pub request: Option<MethodMessage>,
 
-    #[knuffel(child)]
+    #[kdl(child)]
     pub response: Option<MethodMessage>,
 }
 
 /// Message/struct definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "message")]
 pub struct Message {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub description: Option<String>,
 
-    #[knuffel(children(name = "field"))]
+    #[kdl(children, name = "field")]
     pub fields: Vec<Field>,
 }
 
 /// Field definition (KDL representation)
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "field")]
 pub struct Field {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(property(name = "type"))]
+    #[kdl(property, rename = "type")]
     pub field_type_str: String,
 
-    #[knuffel(property, default = false)]
+    #[kdl(property, default)]
     pub required: bool,
 
-    #[knuffel(property(name = "default"))]
+    #[kdl(property, rename = "default")]
     pub default_str: Option<String>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub min: Option<i64>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub max: Option<i64>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub min_length: Option<usize>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub max_length: Option<usize>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub pattern: Option<String>,
 
-    #[knuffel(property)]
+    #[kdl(property)]
     pub description: Option<String>,
 }
 
@@ -284,34 +294,36 @@ pub enum FieldType {
 }
 
 /// Enum definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "enum")]
 pub struct Enum {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child, unwrap(arguments))]
+    #[kdl(child, unwrap_args)]
     pub values: Vec<String>,
 }
 
 /// Type definition
-#[derive(Debug, Clone, knuffel::Decode)]
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "typedef")]
 pub struct TypeDef {
-    #[knuffel(argument)]
+    #[kdl(argument)]
     pub name: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub base_type: String,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub rust_type: Option<String>,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub typescript_type: Option<String>,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub format: Option<String>,
 
-    #[knuffel(child, unwrap(argument))]
+    #[kdl(child, unwrap_arg)]
     pub pattern: Option<String>,
 }
 

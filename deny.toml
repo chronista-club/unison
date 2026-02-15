@@ -52,7 +52,7 @@ feature-depth = 1
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is a transitive dependency via knuffel; will be resolved when knuffel updates" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is a transitive dependency; will be resolved when dependencies update" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -192,7 +192,7 @@ unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    "https://github.com/chronista-club/knuffel.git",
+    "https://github.com/chronista-club/unison-kdl.git",
 ]
 
 [sources.allow-org]

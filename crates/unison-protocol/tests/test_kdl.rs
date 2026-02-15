@@ -7,7 +7,7 @@ protocol "TestProtocol" version="1.0.0" {
     service "TestService" {
         method "testMethod" {
             request {
-                field "test" type="string" required=true
+                field "test" type="string" required=#true
             }
             response {
                 field "result" type="bool"
@@ -44,8 +44,8 @@ protocol "TestProtocol" version="1.0.0" {
 fn test_message_with_fields() {
     let schema_str = r#"
 message "User" {
-    field "id" type="int" required=true
-    field "name" type="string" required=true
+    field "id" type="int" required=#true
+    field "name" type="string" required=#true
     field "email" type="string"
     field "age" type="int" min=0 max=150
 }
@@ -98,7 +98,7 @@ fn test_channel_parsing() {
 
             channel "events" from="server" lifetime="persistent" {
                 send "Event" {
-                    field "event_type" type="string" required=true
+                    field "event_type" type="string" required=#true
                     field "payload" type="json"
                 }
             }
@@ -114,7 +114,7 @@ fn test_channel_parsing() {
 
             channel "query" from="client" lifetime="transient" {
                 send "Request" {
-                    field "method" type="string" required=true
+                    field "method" type="string" required=#true
                     field "params" type="json"
                 }
                 recv "Response" {
@@ -128,7 +128,7 @@ fn test_channel_parsing() {
 
             channel "chat" from="either" lifetime="persistent" {
                 send "Message" {
-                    field "text" type="string" required=true
+                    field "text" type="string" required=#true
                     field "from" type="string"
                 }
                 recv "Message"

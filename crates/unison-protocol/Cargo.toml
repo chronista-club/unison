@@ -69,7 +69,7 @@ indexmap.workspace = true
 scc.workspace = true
 tempfile.workspace = true
 kdl.workspace = true
-knuffel.workspace = true
+unison-kdl.workspace = true
 
 [build-dependencies]
 kdl.workspace = true

@@ -66,7 +66,7 @@ indexmap = "2.6"
 scc = "3"
 tempfile = "3.13"
 kdl = "6.3.4"
-knuffel = { git = "https://github.com/chronista-club/knuffel.git" }
+unison-kdl = { git = "https://github.com/chronista-club/unison-kdl.git" }
 
 # Dev dependencies
 pretty_assertions = "1.4"
