@@ -1,7 +1,7 @@
 use super::CodeGenerator;
 use crate::parser::{
-    DefaultValue, Enum, Field, FieldType, Message, Method, MethodMessage, ParsedSchema, Protocol,
-    Service, Stream, TypeRegistry,
+    Channel, ChannelFrom, ChannelLifetime, ChannelMessage, DefaultValue, Enum, Field, FieldType,
+    Message, Method, MethodMessage, ParsedSchema, Protocol, Service, Stream, TypeRegistry,
 };
 use anyhow::Result;
 use convert_case::{Case, Casing};
@@ -75,6 +75,16 @@ impl RustGenerator {
         // サービスを生成
         for service in &protocol.services {
             tokens.extend(self.generate_service(service, type_registry));
+        }
+
+        // チャネルのメッセージ型を生成
+        for channel in &protocol.channels {
+            tokens.extend(self.generate_channel_messages(channel, type_registry));
+        }
+
+        // Connection構造体を生成
+        if !protocol.channels.is_empty() {
+            tokens.extend(self.generate_connection_struct(protocol));
         }
 
         tokens
@@ -368,6 +378,109 @@ impl RustGenerator {
             }
         } else {
             quote! { () }
+        }
+    }
+
+    /// チャネルのメッセージ構造体を生成
+    fn generate_channel_messages(
+        &self,
+        channel: &Channel,
+        type_registry: &TypeRegistry,
+    ) -> TokenStream {
+        let mut tokens = TokenStream::new();
+
+        // send, recv, error の各メッセージ型を生成
+        for msg in [&channel.send, &channel.recv, &channel.error]
+            .iter()
+            .filter_map(|m| m.as_ref())
+        {
+            tokens.extend(self.generate_channel_message_struct(msg, type_registry));
+        }
+
+        tokens
+    }
+
+    /// 個別のチャネルメッセージ構造体を生成
+    fn generate_channel_message_struct(
+        &self,
+        msg: &ChannelMessage,
+        type_registry: &TypeRegistry,
+    ) -> TokenStream {
+        let name = format_ident!("{}", msg.name);
+
+        if msg.fields.is_empty() {
+            // フィールドなしの場合はユニット構造体
+            quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name;
+            }
+        } else {
+            let fields: Vec<_> = msg
+                .fields
+                .iter()
+                .map(|f| self.generate_field(f, type_registry))
+                .collect();
+
+            quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name {
+                    #(#fields),*
+                }
+            }
+        }
+    }
+
+    /// Connection構造体を生成（プロトコルの全チャネルをフィールドとして持つ）
+    fn generate_connection_struct(&self, protocol: &Protocol) -> TokenStream {
+        let struct_name = format_ident!(
+            "{}Connection",
+            protocol.name.to_case(Case::Pascal)
+        );
+
+        let fields: Vec<_> = protocol
+            .channels
+            .iter()
+            .map(|channel| {
+                let field_name = format_ident!("{}", channel.name.to_case(Case::Snake));
+                let field_type = self.channel_field_type(channel);
+                quote! {
+                    pub #field_name: #field_type
+                }
+            })
+            .collect();
+
+        quote! {
+            pub struct #struct_name {
+                #(#fields),*
+            }
+        }
+    }
+
+    /// チャネルの特性に応じたフィールド型を決定
+    fn channel_field_type(&self, channel: &Channel) -> TokenStream {
+        let has_send = channel.send.is_some();
+        let has_recv = channel.recv.is_some();
+
+        match (has_send, has_recv, &channel.lifetime, &channel.from) {
+            // サーバープッシュ（send only, from=Server）: クライアントは受信のみ
+            (true, false, _, ChannelFrom::Server) => {
+                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
+                quote! { ReceiveChannel<#send_type> }
+            }
+            // クライアント→サーバーのトランジェント（send+recv, Transient）: リクエスト-レスポンス
+            (true, true, ChannelLifetime::Transient, _) => {
+                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
+                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
+                quote! { RequestChannel<#send_type, #recv_type> }
+            }
+            // 双方向永続（send+recv, Persistent）: 双方向ストリーム
+            (true, true, ChannelLifetime::Persistent, _) => {
+                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
+                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
+                quote! { BidirectionalChannel<#send_type, #recv_type> }
+            }
+            // フォールバック
+            _ => quote! { () },
         }
     }
 
