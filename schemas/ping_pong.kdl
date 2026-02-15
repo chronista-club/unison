@@ -1,0 +1,31 @@
+protocol "ping-pong" version="1.0.0" {
+    namespace "test.ping_pong"
+
+    service "PingPong" {
+        method "ping" {
+            request {
+                field "message" type="string" required=#true
+            }
+            response {
+                field "reply" type="string" required=#true
+                field "timestamp" type="string"
+            }
+        }
+
+        method "echo" {
+            request {
+                field "data" type="json" required=#true
+            }
+            response {
+                field "data" type="json" required=#true
+            }
+        }
+
+        method "health" {
+            response {
+                field "status" type="string" required=#true
+                field "uptime_ms" type="int"
+            }
+        }
+    }
+}

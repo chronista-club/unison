@@ -131,10 +131,8 @@ export type LanguageCode = string; // ISO 639-1 format
             ));
         }
 
-        if field.constraints().min.is_some() || field.constraints().max.is_some() {
-            if let (Some(min), Some(max)) = (field.constraints().min, field.constraints().max) {
-                comments.push(format!("@minimum {} @maximum {}", min, max));
-            }
+        if let (Some(min), Some(max)) = (field.constraints().min, field.constraints().max) {
+            comments.push(format!("@minimum {} @maximum {}", min, max));
         }
 
         if let Some(pattern) = &field.constraints().pattern {

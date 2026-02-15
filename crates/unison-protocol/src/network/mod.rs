@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use crate::packet::{RkyvPayload, SerializationError, UnisonPacket};
 
+pub mod channel;
 pub mod client;
+pub mod identity;
 pub mod quic;
 pub mod server;
 pub mod service;

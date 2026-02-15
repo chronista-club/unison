@@ -7,7 +7,7 @@ protocol "TestProtocol" version="1.0.0" {
     service "TestService" {
         method "testMethod" {
             request {
-                field "test" type="string" required=true
+                field "test" type="string" required=#true
             }
             response {
                 field "result" type="bool"
@@ -44,8 +44,8 @@ protocol "TestProtocol" version="1.0.0" {
 fn test_message_with_fields() {
     let schema_str = r#"
 message "User" {
-    field "id" type="int" required=true
-    field "name" type="string" required=true
+    field "id" type="int" required=#true
+    field "name" type="string" required=#true
     field "email" type="string"
     field "age" type="int" min=0 max=150
 }
@@ -88,4 +88,86 @@ enum "Status" {
     assert_eq!(enum_def.name, "Status");
     assert_eq!(enum_def.values.len(), 4);
     assert_eq!(enum_def.values[0], "pending");
+}
+
+#[test]
+fn test_channel_parsing() {
+    let schema = r#"
+        protocol "test-streaming" version="1.0.0" {
+            namespace "test.streaming"
+
+            channel "events" from="server" lifetime="persistent" {
+                send "Event" {
+                    field "event_type" type="string" required=#true
+                    field "payload" type="json"
+                }
+            }
+
+            channel "control" from="client" lifetime="persistent" {
+                send "Subscribe" {
+                    field "category" type="string"
+                }
+                recv "Ack" {
+                    field "status" type="string"
+                }
+            }
+
+            channel "query" from="client" lifetime="transient" {
+                send "Request" {
+                    field "method" type="string" required=#true
+                    field "params" type="json"
+                }
+                recv "Response" {
+                    field "data" type="json"
+                }
+                error "QueryError" {
+                    field "code" type="string"
+                    field "message" type="string"
+                }
+            }
+
+            channel "chat" from="either" lifetime="persistent" {
+                send "Message" {
+                    field "text" type="string" required=#true
+                    field "from" type="string"
+                }
+                recv "Message"
+            }
+        }
+    "#;
+
+    let parser = SchemaParser::new();
+    let result = parser.parse(schema).unwrap();
+    let protocol = result.protocol.as_ref().unwrap();
+
+    // channelが4つパースされること
+    assert_eq!(protocol.channels.len(), 4);
+
+    // events channel
+    let events = &protocol.channels[0];
+    assert_eq!(events.name, "events");
+    assert_eq!(events.from, ChannelFrom::Server);
+    assert_eq!(events.lifetime, ChannelLifetime::Persistent);
+    assert!(events.send.is_some());
+    assert!(events.recv.is_none());
+
+    // events.send のメッセージ名とフィールドを確認
+    let send_msg = events.send.as_ref().unwrap();
+    assert_eq!(send_msg.name, "Event");
+    assert_eq!(send_msg.fields.len(), 2);
+
+    // control channel
+    let control = &protocol.channels[1];
+    assert_eq!(control.from, ChannelFrom::Client);
+    assert!(control.send.is_some());
+    assert!(control.recv.is_some());
+
+    // query channel - with error
+    let query = &protocol.channels[2];
+    assert_eq!(query.lifetime, ChannelLifetime::Transient);
+    assert!(query.error.is_some());
+
+    // chat channel
+    let chat = &protocol.channels[3];
+    assert_eq!(chat.from, ChannelFrom::Either);
 }

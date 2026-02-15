@@ -3,7 +3,7 @@
 //! このExampleは、Claude AgentがMCP経由でUnison Protocolツールを
 //! 使用して外部サービスにアクセスする方法を示します。
 
-use claude_agent_sdk::{query, ClaudeAgentOptions};
+use claude_agent_sdk::{ClaudeAgentOptions, query};
 use futures::StreamExt;
 use unison_agent::tools::UnisonTools;
 

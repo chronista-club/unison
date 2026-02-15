@@ -18,7 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 最初のメッセージを送信
     println!("Question: Hello! Can you tell me a fun fact about Rust programming language?");
-    let responses = client.query("Hello! Can you tell me a fun fact about Rust programming language?").await?;
+    let responses = client
+        .query("Hello! Can you tell me a fun fact about Rust programming language?")
+        .await?;
 
     println!("\n--- Claude's Response ---");
     for response in &responses {
@@ -28,7 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2回目のメッセージ
     println!("\n\n--- Follow-up Question ---");
     println!("Question: That's interesting! Can you give me another fact?");
-    let responses = client.query("That's interesting! Can you give me another fact?").await?;
+    let responses = client
+        .query("That's interesting! Can you give me another fact?")
+        .await?;
 
     println!("\n--- Claude's Response ---");
     for response in &responses {

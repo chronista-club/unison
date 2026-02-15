@@ -1,0 +1,60 @@
+protocol "creo-sync" version="1.0.0" {
+    namespace "club.chronista.sync"
+
+    // === Control Plane ===
+    channel "control" from="client" lifetime="persistent" {
+        send "Subscribe" {
+            field "category" type="string"
+            field "tags" type="string"
+        }
+        recv "Ack" {
+            field "status" type="string"
+            field "channel_ref" type="string"
+        }
+    }
+
+    // === Data Plane ===
+    channel "events" from="server" lifetime="persistent" {
+        send "MemoryEvent" {
+            field "event_type" type="string" required=#true
+            field "memory_id" type="string" required=#true
+            field "category" type="string"
+            field "from" type="string"
+            field "timestamp" type="string"
+        }
+    }
+
+    channel "query" from="client" lifetime="transient" {
+        send "Query" {
+            field "method" type="string" required=#true
+            field "params" type="json"
+        }
+        recv "Result" {
+            field "data" type="json"
+        }
+        error "QueryError" {
+            field "code" type="string"
+            field "message" type="string"
+        }
+    }
+
+    // === Messaging Plane ===
+    channel "messaging" from="either" lifetime="persistent" {
+        send "CCMessage" {
+            field "from" type="string" required=#true
+            field "to" type="string"
+            field "content" type="string" required=#true
+            field "thread" type="string"
+        }
+        recv "CCMessage"
+    }
+
+    // === Urgent Plane ===
+    channel "urgent" from="server" lifetime="transient" {
+        send "Alert" {
+            field "level" type="string" required=#true
+            field "title" type="string" required=#true
+            field "body" type="string"
+        }
+    }
+}

@@ -43,7 +43,7 @@ convert_case.workspace = true
 
 # Schema parsing
 kdl.workspace = true
-knuffel.workspace = true
+unison-kdl.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

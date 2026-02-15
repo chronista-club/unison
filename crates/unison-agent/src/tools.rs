@@ -4,7 +4,7 @@
 //! 外部サービスにアクセスするためのツールを提供します。
 
 use claude_agent_sdk::mcp::{SdkMcpServer, SdkMcpTool, ToolResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info};
 use unison::ProtocolClient;
 
@@ -46,7 +46,9 @@ impl UnisonTools {
                     let url = args["url"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))
-                        .map_err(|e| claude_agent_sdk::error::ClaudeError::Connection(e.to_string()))?;
+                        .map_err(|e| {
+                            claude_agent_sdk::error::ClaudeError::Connection(e.to_string())
+                        })?;
 
                     info!("Connecting to Unison server: {}", url);
 
@@ -89,11 +91,15 @@ impl UnisonTools {
                     let service = args["service"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing 'service' parameter"))
-                        .map_err(|e| claude_agent_sdk::error::ClaudeError::Connection(e.to_string()))?;
+                        .map_err(|e| {
+                            claude_agent_sdk::error::ClaudeError::Connection(e.to_string())
+                        })?;
                     let method = args["method"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing 'method' parameter"))
-                        .map_err(|e| claude_agent_sdk::error::ClaudeError::Connection(e.to_string()))?;
+                        .map_err(|e| {
+                            claude_agent_sdk::error::ClaudeError::Connection(e.to_string())
+                        })?;
                     let payload = args.get("payload").cloned().unwrap_or(json!({}));
 
                     info!(
