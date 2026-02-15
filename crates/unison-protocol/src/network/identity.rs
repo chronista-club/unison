@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ProtocolMessage, MessageType};
+use super::{MessageType, ProtocolMessage};
 
 /// サーバーの自己紹介情報
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,10 +1,14 @@
-use unison::prelude::*;
-use unison::parser::TypeRegistry;
 use unison::codegen::CodeGenerator;
+use unison::parser::TypeRegistry;
+use unison::prelude::*;
 
 #[test]
 fn test_creo_sync_parse_and_generate() {
-    let schema = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/creo_sync.kdl")).unwrap();
+    let schema = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/creo_sync.kdl"
+    ))
+    .unwrap();
     let parser = SchemaParser::new();
     let parsed = parser.parse(&schema).unwrap();
 
@@ -14,7 +18,10 @@ fn test_creo_sync_parse_and_generate() {
 
     // チャネル名を確認
     let channel_names: Vec<&str> = protocol.channels.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(channel_names, vec!["control", "events", "query", "messaging", "urgent"]);
+    assert_eq!(
+        channel_names,
+        vec!["control", "events", "query", "messaging", "urgent"]
+    );
 
     // コード生成
     let type_registry = TypeRegistry::new();
@@ -42,7 +49,11 @@ fn test_creo_sync_parse_and_generate() {
 
 #[test]
 fn test_creo_sync_channel_types() {
-    let schema = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/creo_sync.kdl")).unwrap();
+    let schema = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/creo_sync.kdl"
+    ))
+    .unwrap();
     let parser = SchemaParser::new();
     let parsed = parser.parse(&schema).unwrap();
     let protocol = parsed.protocol.as_ref().unwrap();

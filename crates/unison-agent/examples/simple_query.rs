@@ -16,7 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // シンプルなクエリを実行
     println!("Querying Claude...");
-    let response = client.query("What is 2 + 2? Please answer briefly.").await?;
+    let response = client
+        .query("What is 2 + 2? Please answer briefly.")
+        .await?;
 
     println!("\n--- Response ---");
     println!("{}", response);

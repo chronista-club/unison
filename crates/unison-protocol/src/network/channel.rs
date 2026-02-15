@@ -55,5 +55,5 @@ pub struct ReceiveChannel<T> {
 pub struct RequestChannel<Req, Res> {
     _req: std::marker::PhantomData<Req>,
     _res: std::marker::PhantomData<Res>,
-    tx: mpsc::Sender<(Req, tokio::sync::oneshot::Sender<Res>)>,
+    pub tx: mpsc::Sender<(Req, tokio::sync::oneshot::Sender<Res>)>,
 }

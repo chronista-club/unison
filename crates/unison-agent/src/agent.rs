@@ -35,14 +35,13 @@ impl AgentClient {
         let mut responses = Vec::new();
 
         while let Some(message_result) = stream.next().await {
-            let message = message_result
-                .map_err(|e| AgentError::Communication(e.to_string()))?;
+            let message = message_result.map_err(|e| AgentError::Communication(e.to_string()))?;
 
             debug!("Received message chunk: {:?}", message);
 
             // メッセージをJSON文字列に変換
-            let json_str = serde_json::to_string(&message)
-                .map_err(|e| AgentError::Other(e.into()))?;
+            let json_str =
+                serde_json::to_string(&message).map_err(|e| AgentError::Other(e.into()))?;
 
             responses.push(json_str);
         }

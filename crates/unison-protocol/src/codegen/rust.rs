@@ -432,10 +432,7 @@ impl RustGenerator {
 
     /// Connection構造体を生成（プロトコルの全チャネルをフィールドとして持つ）
     fn generate_connection_struct(&self, protocol: &Protocol) -> TokenStream {
-        let struct_name = format_ident!(
-            "{}Connection",
-            protocol.name.to_case(Case::Pascal)
-        );
+        let struct_name = format_ident!("{}Connection", protocol.name.to_case(Case::Pascal));
 
         let fields: Vec<_> = protocol
             .channels
