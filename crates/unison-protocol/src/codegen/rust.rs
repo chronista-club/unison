@@ -56,6 +56,10 @@ impl RustGenerator {
 
             #[allow(unused_imports)]
             use crate::network::{ProtocolClient, ProtocolServer};
+            #[allow(unused_imports)]
+            use crate::network::channel::{
+                BidirectionalChannel, ReceiveChannel, RequestChannel, QuicBackedChannel,
+            };
         }
     }
 
@@ -446,10 +450,87 @@ impl RustGenerator {
             })
             .collect();
 
+        // QuicBackedChannel版のフィールド
+        let quic_fields: Vec<_> = protocol
+            .channels
+            .iter()
+            .map(|channel| {
+                let field_name = format_ident!("{}", channel.name.to_case(Case::Snake));
+                let field_type = self.channel_quic_field_type(channel);
+                quote! {
+                    pub #field_name: #field_type
+                }
+            })
+            .collect();
+
+        // build()メソッドの各チャネル開設コード
+        let channel_opens: Vec<_> = protocol
+            .channels
+            .iter()
+            .map(|channel| {
+                let field_name = format_ident!("{}", channel.name.to_case(Case::Snake));
+                let channel_name = &channel.name;
+                quote! {
+                    #field_name: client.open_channel(#channel_name).await
+                        .map_err(|e| anyhow::anyhow!("Failed to open channel '{}': {}", #channel_name, e))?
+                }
+            })
+            .collect();
+
+        let quic_struct_name = format_ident!("{}QuicConnection", protocol.name.to_case(Case::Pascal));
+        let builder_name = format_ident!("{}ConnectionBuilder", protocol.name.to_case(Case::Pascal));
+
         quote! {
+            /// インメモリチャネルベースのConnection（テスト用）
             pub struct #struct_name {
                 #(#fields),*
             }
+
+            /// QUICストリームベースのConnection（本番用）
+            pub struct #quic_struct_name {
+                #(#quic_fields),*
+            }
+
+            /// ConnectionBuilderトレイト
+            pub trait #builder_name {
+                fn build(
+                    client: &crate::network::client::ProtocolClient,
+                ) -> impl std::future::Future<Output = Result<#quic_struct_name>> + Send;
+            }
+
+            impl #builder_name for #quic_struct_name {
+                async fn build(
+                    client: &crate::network::client::ProtocolClient,
+                ) -> Result<#quic_struct_name> {
+                    Ok(#quic_struct_name {
+                        #(#channel_opens),*
+                    })
+                }
+            }
+        }
+    }
+
+    /// チャネルの特性に応じたQuicBackedChannel型を決定
+    fn channel_quic_field_type(&self, channel: &Channel) -> TokenStream {
+        let has_send = channel.send.is_some();
+        let has_recv = channel.recv.is_some();
+
+        match (has_send, has_recv) {
+            (true, true) => {
+                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
+                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
+                quote! { QuicBackedChannel<#send_type, #recv_type> }
+            }
+            (true, false) => {
+                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
+                // 受信専用: サーバーからのpushはSendTypeを受信する
+                quote! { QuicBackedChannel<(), #send_type> }
+            }
+            (false, true) => {
+                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
+                quote! { QuicBackedChannel<#recv_type, ()> }
+            }
+            _ => quote! { () },
         }
     }
 
