@@ -50,6 +50,69 @@ pub struct Protocol {
 
     #[knuffel(children(name = "enum"))]
     pub enums: Vec<Enum>,
+
+    #[knuffel(children(name = "channel"))]
+    pub channels: Vec<Channel>,
+}
+
+/// Channel開始者
+#[derive(Debug, Clone, PartialEq, knuffel::DecodeScalar)]
+pub enum ChannelFrom {
+    #[knuffel(rename = "client")]
+    Client,
+    #[knuffel(rename = "server")]
+    Server,
+    #[knuffel(rename = "either")]
+    Either,
+}
+
+/// Channelの寿命
+#[derive(Debug, Clone, PartialEq, knuffel::DecodeScalar)]
+pub enum ChannelLifetime {
+    #[knuffel(rename = "transient")]
+    Transient,
+    #[knuffel(rename = "persistent")]
+    Persistent,
+}
+
+/// Channel内のメッセージ定義（名前付き）
+#[derive(Debug, Clone, knuffel::Decode)]
+pub struct ChannelMessage {
+    /// メッセージ名
+    #[knuffel(argument)]
+    pub name: String,
+
+    /// フィールド定義
+    #[knuffel(children(name = "field"))]
+    pub fields: Vec<Field>,
+}
+
+/// Channel定義（Stream-First APIのプリミティブ）
+#[derive(Debug, Clone, knuffel::Decode)]
+pub struct Channel {
+    /// チャネル名
+    #[knuffel(argument)]
+    pub name: String,
+
+    /// 誰がStreamを開くか
+    #[knuffel(property)]
+    pub from: ChannelFrom,
+
+    /// Streamの寿命
+    #[knuffel(property)]
+    pub lifetime: ChannelLifetime,
+
+    /// 送信メッセージ型（opener視点）
+    #[knuffel(child)]
+    pub send: Option<ChannelMessage>,
+
+    /// 受信メッセージ型（opener視点）
+    #[knuffel(child)]
+    pub recv: Option<ChannelMessage>,
+
+    /// エラー型
+    #[knuffel(child)]
+    pub error: Option<ChannelMessage>,
 }
 
 /// Service definition

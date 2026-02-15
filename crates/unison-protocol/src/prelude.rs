@@ -10,7 +10,9 @@
 //! ```
 
 // パーサー関連
-pub use crate::parser::{ParsedSchema, SchemaParser};
+pub use crate::parser::{
+    Channel, ChannelFrom, ChannelLifetime, ChannelMessage, ParsedSchema, SchemaParser,
+};
 
 // コードジェネレータ関連
 pub use crate::codegen::{CodeGenerator, RustGenerator, TypeScriptGenerator};
