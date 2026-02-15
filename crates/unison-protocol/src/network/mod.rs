@@ -11,6 +11,8 @@ pub mod client;
 pub mod quic;
 pub mod server;
 pub mod service;
+pub mod identity;
+pub mod channel;
 
 pub use client::ProtocolClient;
 pub use quic::{QuicClient, QuicServer, UnisonStream};
