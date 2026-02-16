@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
 use super::service::Service;
 use super::{
     MessageType, NetworkError, ProtocolMessage, ProtocolServerTrait, UnisonServer, UnisonServerExt,
@@ -36,6 +37,16 @@ type StreamHandler = Arc<
 type UnisonHandler =
     Arc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, NetworkError> + Send + Sync>;
 
+/// チャネルハンドラー型（接続コンテキスト + UnisonStreamを受け取る）
+pub type ChannelHandler = Arc<
+    dyn Fn(
+            Arc<super::context::ConnectionContext>,
+            super::quic::UnisonStream,
+        ) -> Pin<Box<dyn futures_util::Future<Output = Result<(), NetworkError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// プロトコルサーバー実装
 pub struct ProtocolServer {
     call_handlers: Arc<RwLock<HashMap<String, CallHandler>>>,
@@ -43,6 +54,12 @@ pub struct ProtocolServer {
     unison_handlers: Arc<RwLock<HashMap<String, UnisonHandler>>>,
     services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
     running: Arc<RwLock<bool>>,
+    /// サーバー識別情報
+    server_name: String,
+    server_version: String,
+    server_namespace: String,
+    /// チャネルハンドラー（チャネル名 → ハンドラー関数）
+    channel_handlers: Arc<RwLock<HashMap<String, ChannelHandler>>>,
 }
 
 impl ProtocolServer {
@@ -53,7 +70,70 @@ impl ProtocolServer {
             unison_handlers: Arc::new(RwLock::new(HashMap::new())),
             services: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(false)),
+            server_name: "unison".to_string(),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            server_namespace: "default".to_string(),
+            channel_handlers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// サーバー識別情報を設定して作成
+    pub fn with_identity(name: &str, version: &str, namespace: &str) -> Self {
+        Self {
+            server_name: name.to_string(),
+            server_version: version.to_string(),
+            server_namespace: namespace.to_string(),
+            ..Self::new()
+        }
+    }
+
+    /// 登録済みチャネルからServerIdentityを構築
+    pub async fn build_identity(&self) -> ServerIdentity {
+        let mut identity = ServerIdentity::new(
+            &self.server_name,
+            &self.server_version,
+            &self.server_namespace,
+        );
+
+        // チャネルハンドラーからChannelInfoを構築
+        let handlers = self.channel_handlers.read().await;
+        for channel_name in handlers.keys() {
+            identity.add_channel(ChannelInfo {
+                name: channel_name.clone(),
+                direction: ChannelDirection::Bidirectional,
+                lifetime: "persistent".to_string(),
+                status: ChannelStatus::Available,
+            });
+        }
+
+        identity
+    }
+
+    /// チャネルハンドラーを登録
+    pub async fn register_channel<F, Fut>(&self, name: &str, handler: F)
+    where
+        F: Fn(Arc<super::context::ConnectionContext>, super::quic::UnisonStream) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: futures_util::Future<Output = Result<(), NetworkError>> + Send + 'static,
+    {
+        let handler = Arc::new(
+            move |ctx: Arc<super::context::ConnectionContext>,
+                  stream: super::quic::UnisonStream| {
+                Box::pin(handler(ctx, stream))
+                    as Pin<Box<dyn futures_util::Future<Output = Result<(), NetworkError>> + Send>>
+            },
+        );
+
+        let mut handlers = self.channel_handlers.write().await;
+        handlers.insert(name.to_string(), handler);
+    }
+
+    /// チャネルハンドラーを取得
+    pub async fn get_channel_handler(&self, name: &str) -> Option<ChannelHandler> {
+        let handlers = self.channel_handlers.read().await;
+        handlers.get(name).cloned()
     }
 
     /// サーバーにサービスインスタンスを登録
@@ -271,6 +351,10 @@ impl UnisonServer for ProtocolServer {
             unison_handlers: Arc::clone(&self.unison_handlers),
             services: Arc::clone(&self.services),
             running: Arc::clone(&self.running),
+            server_name: self.server_name.clone(),
+            server_version: self.server_version.clone(),
+            server_namespace: self.server_namespace.clone(),
+            channel_handlers: Arc::clone(&self.channel_handlers),
         });
 
         let mut quic_server = QuicServer::new(protocol_server);

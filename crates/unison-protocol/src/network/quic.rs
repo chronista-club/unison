@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 
 use super::{
     MessageType, NetworkError, ProtocolFrame, ProtocolMessage, ProtocolServerTrait, StreamHandle,
-    SystemStream, server::ProtocolServer,
+    SystemStream, context::ConnectionContext, server::ProtocolServer,
 };
 
 /// Default certificate file paths for assets/certs directory
@@ -24,6 +24,36 @@ pub const DEFAULT_KEY_PATH: &str = "assets/certs/private_key.der";
 
 /// Maximum message size for QUIC streams (8MB)
 const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
+
+/// Length-prefixed フレームの読み取り（4バイトBE長 + データ）
+/// ストリームを消費せずに1フレームだけ読む
+pub async fn read_frame(recv: &mut RecvStream) -> Result<bytes::Bytes> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .context("Failed to read frame length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MESSAGE_SIZE {
+        return Err(anyhow::anyhow!("Frame too large: {} bytes", len));
+    }
+    let mut data = vec![0u8; len];
+    recv.read_exact(&mut data)
+        .await
+        .context("Failed to read frame data")?;
+    Ok(bytes::Bytes::from(data))
+}
+
+/// Length-prefixed フレームの書き込み
+pub async fn write_frame(send: &mut SendStream, data: &[u8]) -> Result<()> {
+    let len = (data.len() as u32).to_be_bytes();
+    send.write_all(&len)
+        .await
+        .context("Failed to write frame length")?;
+    send.write_all(data)
+        .await
+        .context("Failed to write frame data")?;
+    Ok(())
+}
 
 /// Embedded certificates for development use
 #[derive(RustEmbed)]
@@ -86,6 +116,11 @@ impl QuicClient {
     }
 
     // 双方向ストリームを使うため、start_receive_loopは不要になりました
+
+    /// QUIC接続への参照を取得（チャネル用ストリーム開設に使用）
+    pub fn connection(&self) -> &Arc<RwLock<Option<Connection>>> {
+        &self.connection
+    }
 }
 
 impl QuicClient {
@@ -486,8 +521,9 @@ impl QuicServer {
             info!("New QUIC connection from: {}", remote_addr);
 
             let server = Arc::clone(&self.server);
+            let ctx = Arc::new(ConnectionContext::new());
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(connection, server).await {
+                if let Err(e) = handle_connection(connection, server, ctx).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -497,199 +533,192 @@ impl QuicServer {
     }
 }
 
-async fn handle_connection(connection: Connection, server: Arc<ProtocolServer>) -> Result<()> {
+async fn handle_connection(
+    connection: Connection,
+    server: Arc<ProtocolServer>,
+    ctx: Arc<ConnectionContext>,
+) -> Result<()> {
+    // Identity Handshake: 接続直後にServerIdentityを送信
+    let identity = server.build_identity().await;
+    ctx.set_identity(identity.clone()).await;
+
+    let identity_msg = identity.to_protocol_message();
+    if let Ok(frame) = identity_msg.into_frame() {
+        let frame_bytes = frame.to_bytes();
+        match connection.open_bi().await {
+            Ok((mut send_stream, _recv_stream)) => {
+                if let Err(e) = send_stream.write_all(&frame_bytes).await {
+                    warn!("Failed to send identity: {}", e);
+                } else {
+                    let _ = send_stream.finish();
+                    info!("Identity sent to client");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to open identity stream: {}", e);
+            }
+        }
+    }
+
     loop {
         let connection_clone = connection.clone();
         match connection.accept_bi().await {
             Ok((mut send_stream, mut recv_stream)) => {
                 let server = Arc::clone(&server);
                 let connection = connection_clone;
+                let ctx = Arc::clone(&ctx);
 
                 tokio::spawn(async move {
-                    match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
-                        Ok(data) => {
-                            // フレームからProtocolMessageを復元
-                            let frame_bytes = bytes::Bytes::from(data);
-                            let frame_result = ProtocolFrame::from_bytes(&frame_bytes);
-                            let request_result =
-                                frame_result.and_then(|frame| ProtocolMessage::from_frame(&frame));
+                    // まずフレームベースの読み取りを試行（チャネル対応）
+                    // フォールバック: 旧形式（read_to_end）も試す
+                    let request_result = match read_frame(&mut recv_stream).await {
+                        Ok(frame_bytes) => ProtocolFrame::from_bytes(&frame_bytes)
+                            .and_then(|frame| ProtocolMessage::from_frame(&frame)),
+                        Err(_) => {
+                            // read_to_end にフォールバック（旧クライアント互換）
+                            match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
+                                Ok(data) => {
+                                    let frame_bytes = bytes::Bytes::from(data);
+                                    ProtocolFrame::from_bytes(&frame_bytes)
+                                        .and_then(|frame| ProtocolMessage::from_frame(&frame))
+                                }
+                                Err(e) => {
+                                    error!("Failed to read from stream: {}", e);
+                                    return;
+                                }
+                            }
+                        }
+                    };
 
-                            match request_result {
-                                Ok(request) => {
-                                    // Process the message based on its type
-                                    match request.msg_type {
-                                        super::MessageType::Request => {
-                                            let payload_value = match request.payload_as_value() {
-                                                Ok(v) => v,
+                    match request_result {
+                        Ok(request) => {
+                            // チャネルルーティング: __channel: プレフィックスをチェック
+                            if let Some(channel_name) = request.method.strip_prefix("__channel:") {
+                                let channel_name = channel_name.to_string();
+                                if let Some(handler) =
+                                    server.get_channel_handler(&channel_name).await
+                                {
+                                    // チャネル用のUnisonStreamを作成（ストリームは生きたまま）
+                                    let stream = UnisonStream::from_streams(
+                                        request.id,
+                                        request.method.clone(),
+                                        Arc::new(connection),
+                                        send_stream,
+                                        recv_stream,
+                                    );
+                                    if let Err(e) = handler(ctx, stream).await {
+                                        error!(
+                                            "Channel handler error for '{}': {}",
+                                            channel_name, e
+                                        );
+                                    }
+                                } else {
+                                    warn!("No channel handler for: {}", channel_name);
+                                }
+                                return;
+                            }
+
+                            // Process the message based on its type
+                            match request.msg_type {
+                                super::MessageType::Request => {
+                                    let payload_value = match request.payload_as_value() {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            error!("Failed to parse request payload: {}", e);
+                                            return;
+                                        }
+                                    };
+
+                                    let response =
+                                        server.handle_call(&request.method, payload_value).await;
+
+                                    let response_msg = match response {
+                                        Ok(payload) => {
+                                            match ProtocolMessage::new_with_json(
+                                                request.id,
+                                                request.method,
+                                                super::MessageType::Response,
+                                                payload,
+                                            ) {
+                                                Ok(msg) => msg,
                                                 Err(e) => {
-                                                    error!(
-                                                        "Failed to parse request payload: {}",
-                                                        e
-                                                    );
+                                                    error!("Failed to create response: {}", e);
                                                     return;
-                                                }
-                                            };
-
-                                            let response = server
-                                                .handle_call(&request.method, payload_value)
-                                                .await;
-
-                                            let response_msg = match response {
-                                                Ok(payload) => {
-                                                    match ProtocolMessage::new_with_json(
-                                                        request.id,
-                                                        request.method,
-                                                        super::MessageType::Response,
-                                                        payload,
-                                                    ) {
-                                                        Ok(msg) => msg,
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Failed to create response: {}",
-                                                                e
-                                                            );
-                                                            return;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    match ProtocolMessage::new_with_json(
-                                                        request.id,
-                                                        request.method,
-                                                        super::MessageType::Error,
-                                                        serde_json::json!({
-                                                            "message": e.to_string(),
-                                                        }),
-                                                    ) {
-                                                        Ok(msg) => msg,
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Failed to create error response: {}",
-                                                                e
-                                                            );
-                                                            return;
-                                                        }
-                                                    }
-                                                }
-                                            };
-
-                                            // 双方向ストリームの送信側を使ってレスポンスをフレームとして送信
-                                            match response_msg.into_frame() {
-                                                Ok(frame) => {
-                                                    let frame_bytes = frame.to_bytes();
-                                                    if let Err(e) =
-                                                        send_stream.write_all(&frame_bytes).await
-                                                    {
-                                                        error!("Failed to send response: {}", e);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    error!(
-                                                        "Failed to create response frame: {}",
-                                                        e
-                                                    );
                                                 }
                                             }
-                                            let _ = send_stream.finish();
                                         }
-                                        super::MessageType::Stream => {
-                                            let payload_value = match request.payload_as_value() {
-                                                Ok(v) => v,
+                                        Err(e) => {
+                                            match ProtocolMessage::new_with_json(
+                                                request.id,
+                                                request.method,
+                                                super::MessageType::Error,
+                                                serde_json::json!({
+                                                    "message": e.to_string(),
+                                                }),
+                                            ) {
+                                                Ok(msg) => msg,
                                                 Err(e) => {
                                                     error!(
-                                                        "Failed to parse stream request payload: {}",
+                                                        "Failed to create error response: {}",
                                                         e
                                                     );
                                                     return;
                                                 }
-                                            };
+                                            }
+                                        }
+                                    };
 
-                                            match server
-                                                .handle_stream(&request.method, payload_value)
-                                                .await
+                                    // 双方向ストリームの送信側を使ってレスポンスをフレームとして送信
+                                    match response_msg.into_frame() {
+                                        Ok(frame) => {
+                                            let frame_bytes = frame.to_bytes();
+                                            if let Err(e) =
+                                                send_stream.write_all(&frame_bytes).await
                                             {
-                                                Ok(mut stream) => {
-                                                    while let Some(item) = stream.next().await {
-                                                        let msg = match item {
-                                                            Ok(payload) => {
-                                                                match ProtocolMessage::new_with_json(
-                                                                    request.id,
-                                                                    request.method.clone(),
-                                                                    super::MessageType::StreamData,
-                                                                    payload,
-                                                                ) {
-                                                                    Ok(msg) => msg,
-                                                                    Err(e) => {
-                                                                        error!(
-                                                                            "Failed to create stream data message: {}",
-                                                                            e
-                                                                        );
-                                                                        break;
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                match ProtocolMessage::new_with_json(
-                                                                    request.id,
-                                                                    request.method.clone(),
-                                                                    super::MessageType::Error,
-                                                                    serde_json::json!({
-                                                                        "message": e.to_string(),
-                                                                    }),
-                                                                ) {
-                                                                    Ok(msg) => msg,
-                                                                    Err(e) => {
-                                                                        error!(
-                                                                            "Failed to create error message: {}",
-                                                                            e
-                                                                        );
-                                                                        break;
-                                                                    }
-                                                                }
-                                                            }
-                                                        };
+                                                error!("Failed to send response: {}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to create response frame: {}", e);
+                                        }
+                                    }
+                                    let _ = send_stream.finish();
+                                }
+                                super::MessageType::Stream => {
+                                    let payload_value = match request.payload_as_value() {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            error!("Failed to parse stream request payload: {}", e);
+                                            return;
+                                        }
+                                    };
 
-                                                        if let Err(e) =
-                                                            send_response(connection.clone(), msg)
-                                                                .await
-                                                        {
-                                                            error!(
-                                                                "Failed to send stream data: {}",
-                                                                e
-                                                            );
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    // Send stream end message
-                                                    let end_msg =
+                                    match server.handle_stream(&request.method, payload_value).await
+                                    {
+                                        Ok(mut stream) => {
+                                            while let Some(item) = stream.next().await {
+                                                let msg = match item {
+                                                    Ok(payload) => {
                                                         match ProtocolMessage::new_with_json(
                                                             request.id,
-                                                            request.method,
-                                                            super::MessageType::StreamEnd,
-                                                            serde_json::json!({}),
+                                                            request.method.clone(),
+                                                            super::MessageType::StreamData,
+                                                            payload,
                                                         ) {
                                                             Ok(msg) => msg,
                                                             Err(e) => {
                                                                 error!(
-                                                                    "Failed to create stream end message: {}",
+                                                                    "Failed to create stream data message: {}",
                                                                     e
                                                                 );
-                                                                return;
+                                                                break;
                                                             }
-                                                        };
-
-                                                    if let Err(e) =
-                                                        send_response(connection, end_msg).await
-                                                    {
-                                                        error!("Failed to send stream end: {}", e);
+                                                        }
                                                     }
-                                                }
-                                                Err(e) => {
-                                                    let error_msg =
+                                                    Err(e) => {
                                                         match ProtocolMessage::new_with_json(
                                                             request.id,
-                                                            request.method,
+                                                            request.method.clone(),
                                                             super::MessageType::Error,
                                                             serde_json::json!({
                                                                 "message": e.to_string(),
@@ -701,36 +730,73 @@ async fn handle_connection(connection: Connection, server: Arc<ProtocolServer>) 
                                                                     "Failed to create error message: {}",
                                                                     e
                                                                 );
-                                                                return;
+                                                                break;
                                                             }
-                                                        };
-
-                                                    if let Err(e) =
-                                                        send_response(connection, error_msg).await
-                                                    {
-                                                        error!(
-                                                            "Failed to send error response: {}",
-                                                            e
-                                                        );
+                                                        }
                                                     }
+                                                };
+
+                                                if let Err(e) =
+                                                    send_response(connection.clone(), msg).await
+                                                {
+                                                    error!("Failed to send stream data: {}", e);
+                                                    break;
                                                 }
                                             }
+
+                                            // Send stream end message
+                                            let end_msg = match ProtocolMessage::new_with_json(
+                                                request.id,
+                                                request.method,
+                                                super::MessageType::StreamEnd,
+                                                serde_json::json!({}),
+                                            ) {
+                                                Ok(msg) => msg,
+                                                Err(e) => {
+                                                    error!(
+                                                        "Failed to create stream end message: {}",
+                                                        e
+                                                    );
+                                                    return;
+                                                }
+                                            };
+
+                                            if let Err(e) = send_response(connection, end_msg).await
+                                            {
+                                                error!("Failed to send stream end: {}", e);
+                                            }
                                         }
-                                        _ => {
-                                            warn!(
-                                                "Unexpected message type: {:?}",
-                                                request.msg_type
-                                            );
+                                        Err(e) => {
+                                            let error_msg = match ProtocolMessage::new_with_json(
+                                                request.id,
+                                                request.method,
+                                                super::MessageType::Error,
+                                                serde_json::json!({
+                                                    "message": e.to_string(),
+                                                }),
+                                            ) {
+                                                Ok(msg) => msg,
+                                                Err(e) => {
+                                                    error!("Failed to create error message: {}", e);
+                                                    return;
+                                                }
+                                            };
+
+                                            if let Err(e) =
+                                                send_response(connection, error_msg).await
+                                            {
+                                                error!("Failed to send error response: {}", e);
+                                            }
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to parse message: {}", e);
+                                _ => {
+                                    warn!("Unexpected message type: {:?}", request.msg_type);
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to read from stream: {}", e);
+                            warn!("Failed to parse message: {}", e);
                         }
                     }
                 });

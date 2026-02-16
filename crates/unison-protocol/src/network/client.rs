@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use futures_util::Stream;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::quic::QuicClient;
+use super::channel::QuicBackedChannel;
+use super::context::ConnectionContext;
+use super::identity::ServerIdentity;
+use super::quic::{QuicClient, UnisonStream, write_frame};
 use super::service::Service;
 use super::{
     MessageType, NetworkError, ProtocolClientTrait, ProtocolMessage, UnisonClient, UnisonClientExt,
@@ -18,6 +21,8 @@ use super::{
 pub struct ProtocolClient {
     transport: Arc<QuicClient>,
     services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
+    /// 接続コンテキスト（Identity情報・チャネル状態）
+    context: Arc<ConnectionContext>,
 }
 
 // Transport trait removed - using direct implementation on TransportWrapper
@@ -27,6 +32,7 @@ impl ProtocolClient {
         Self {
             transport: Arc::new(transport),
             services: Arc::new(RwLock::new(HashMap::new())),
+            context: Arc::new(ConnectionContext::new()),
         }
     }
 
@@ -36,7 +42,132 @@ impl ProtocolClient {
         Ok(Self {
             transport: Arc::new(transport),
             services: Arc::new(RwLock::new(HashMap::new())),
+            context: Arc::new(ConnectionContext::new()),
         })
+    }
+
+    /// 接続コンテキストを取得
+    pub fn context(&self) -> &Arc<ConnectionContext> {
+        &self.context
+    }
+
+    /// サーバーから受信したIdentity情報を取得
+    pub async fn server_identity(&self) -> Option<ServerIdentity> {
+        self.context.identity().await
+    }
+
+    /// チャネルを開く（QUICストリーム上の型安全チャネル）
+    ///
+    /// `__channel:{name}` メソッドで新しいQUICストリームを開き、
+    /// `QuicBackedChannel` でラップして返す。
+    pub async fn open_channel<S, R>(
+        &self,
+        channel_name: &str,
+    ) -> Result<QuicBackedChannel<S, R>, NetworkError>
+    where
+        S: Serialize + Send,
+        R: DeserializeOwned + Send,
+    {
+        let connection_guard = self.transport.connection().read().await;
+        let connection = connection_guard
+            .as_ref()
+            .ok_or(NetworkError::NotConnected)?;
+
+        // 新しい双方向ストリームを開く
+        let (mut send_stream, recv_stream) = connection
+            .open_bi()
+            .await
+            .map_err(|e| NetworkError::Quic(format!("Failed to open channel stream: {}", e)))?;
+
+        // チャネル識別メッセージを送信（length-prefixed）
+        let method = format!("__channel:{}", channel_name);
+        let request_id = generate_request_id();
+        let message = ProtocolMessage::new_with_json(
+            request_id,
+            method,
+            MessageType::BidirectionalStream,
+            serde_json::json!({}),
+        )?;
+
+        let frame = message.into_frame().map_err(|e| {
+            NetworkError::Protocol(format!("Failed to create channel frame: {}", e))
+        })?;
+        let frame_bytes = frame.to_bytes();
+        write_frame(&mut send_stream, &frame_bytes)
+            .await
+            .map_err(|e| NetworkError::Protocol(format!("Failed to send channel open: {}", e)))?;
+
+        // UnisonStreamを作成してQuicBackedChannelでラップ
+        let conn_arc = Arc::new(connection.clone());
+        let stream = UnisonStream::from_streams(
+            request_id,
+            format!("__channel:{}", channel_name),
+            conn_arc,
+            send_stream,
+            recv_stream,
+        );
+
+        // コンテキストにチャネルを登録
+        self.context
+            .register_channel(super::context::ChannelHandle {
+                channel_name: channel_name.to_string(),
+                stream_id: request_id,
+                direction: super::context::ChannelDirection::Bidirectional,
+            })
+            .await;
+
+        Ok(QuicBackedChannel::new(stream))
+    }
+
+    /// 接続後にサーバーからIdentityを受信する
+    async fn receive_identity(&self) -> Result<ServerIdentity, NetworkError> {
+        // サーバーが開いたIdentityストリームからデータを受信
+        let response =
+            self.transport.receive().await.map_err(|e| {
+                NetworkError::Protocol(format!("Failed to receive identity: {}", e))
+            })?;
+
+        if response.method == "__identity" {
+            let identity = ServerIdentity::from_protocol_message(&response)
+                .map_err(|e| NetworkError::Protocol(format!("Failed to parse identity: {}", e)))?;
+            self.context.set_identity(identity.clone()).await;
+            Ok(identity)
+        } else {
+            Err(NetworkError::Protocol(format!(
+                "Expected identity message, got method: {}",
+                response.method
+            )))
+        }
+    }
+
+    /// サーバーに接続し、チャネル名のリストに基づいて複数チャネルを開く
+    ///
+    /// 接続→Identity受信→全チャネル開設を一括で行う便利メソッド。
+    /// 各チャネルの型はコード生成側（ConnectionBuilder）で決定される。
+    pub async fn connect_with_channels(
+        &mut self,
+        url: &str,
+        channel_names: &[&str],
+    ) -> Result<Vec<String>, NetworkError> {
+        // 接続（Identity受信を含む）
+        UnisonClient::connect(self, url).await?;
+
+        // 各チャネルを開く（型はここでは不明なのでチャネル名のみ返す）
+        let mut opened = Vec::new();
+        for name in channel_names {
+            // チャネル登録はopen_channel呼び出し時に行われる
+            // ここではコンテキストに名前だけ予約
+            self.context
+                .register_channel(super::context::ChannelHandle {
+                    channel_name: name.to_string(),
+                    stream_id: 0, // open_channel時に更新される
+                    direction: super::context::ChannelDirection::Bidirectional,
+                })
+                .await;
+            opened.push(name.to_string());
+        }
+
+        Ok(opened)
     }
 
     /// Register a Service instance with the client
@@ -215,7 +346,23 @@ impl UnisonClient for ProtocolClient {
             .ok_or_else(|| NetworkError::Connection("Failed to get mutable transport".to_string()))?
             .connect(url)
             .await
-            .map_err(|e| NetworkError::Connection(e.to_string()))
+            .map_err(|e| NetworkError::Connection(e.to_string()))?;
+
+        // Identity Handshake: サーバーからIdentityを受信
+        match self.receive_identity().await {
+            Ok(identity) => {
+                tracing::info!(
+                    "Received server identity: {} v{}",
+                    identity.name,
+                    identity.version
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to receive identity (non-fatal): {}", e);
+            }
+        }
+
+        Ok(())
     }
 
     async fn call(
