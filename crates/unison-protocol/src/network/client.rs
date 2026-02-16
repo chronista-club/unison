@@ -95,9 +95,7 @@ impl ProtocolClient {
         let frame_bytes = frame.to_bytes();
         write_frame(&mut send_stream, &frame_bytes)
             .await
-            .map_err(|e| {
-                NetworkError::Protocol(format!("Failed to send channel open: {}", e))
-            })?;
+            .map_err(|e| NetworkError::Protocol(format!("Failed to send channel open: {}", e)))?;
 
         // UnisonStreamを作成してQuicBackedChannelでラップ
         let conn_arc = Arc::new(connection.clone());
@@ -124,11 +122,10 @@ impl ProtocolClient {
     /// 接続後にサーバーからIdentityを受信する
     async fn receive_identity(&self) -> Result<ServerIdentity, NetworkError> {
         // サーバーが開いたIdentityストリームからデータを受信
-        let response = self
-            .transport
-            .receive()
-            .await
-            .map_err(|e| NetworkError::Protocol(format!("Failed to receive identity: {}", e)))?;
+        let response =
+            self.transport.receive().await.map_err(|e| {
+                NetworkError::Protocol(format!("Failed to receive identity: {}", e))
+            })?;
 
         if response.method == "__identity" {
             let identity = ServerIdentity::from_protocol_message(&response)

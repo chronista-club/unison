@@ -89,8 +89,11 @@ impl ProtocolServer {
 
     /// 登録済みチャネルからServerIdentityを構築
     pub async fn build_identity(&self) -> ServerIdentity {
-        let mut identity =
-            ServerIdentity::new(&self.server_name, &self.server_version, &self.server_namespace);
+        let mut identity = ServerIdentity::new(
+            &self.server_name,
+            &self.server_version,
+            &self.server_namespace,
+        );
 
         // チャネルハンドラーからChannelInfoを構築
         let handlers = self.channel_handlers.read().await;
@@ -115,10 +118,13 @@ impl ProtocolServer {
             + 'static,
         Fut: futures_util::Future<Output = Result<(), NetworkError>> + Send + 'static,
     {
-        let handler = Arc::new(move |ctx: Arc<super::context::ConnectionContext>, stream: super::quic::UnisonStream| {
-            Box::pin(handler(ctx, stream))
-                as Pin<Box<dyn futures_util::Future<Output = Result<(), NetworkError>> + Send>>
-        });
+        let handler = Arc::new(
+            move |ctx: Arc<super::context::ConnectionContext>,
+                  stream: super::quic::UnisonStream| {
+                Box::pin(handler(ctx, stream))
+                    as Pin<Box<dyn futures_util::Future<Output = Result<(), NetworkError>> + Send>>
+            },
+        );
 
         let mut handlers = self.channel_handlers.write().await;
         handlers.insert(name.to_string(), handler);

@@ -477,8 +477,10 @@ impl RustGenerator {
             })
             .collect();
 
-        let quic_struct_name = format_ident!("{}QuicConnection", protocol.name.to_case(Case::Pascal));
-        let builder_name = format_ident!("{}ConnectionBuilder", protocol.name.to_case(Case::Pascal));
+        let quic_struct_name =
+            format_ident!("{}QuicConnection", protocol.name.to_case(Case::Pascal));
+        let builder_name =
+            format_ident!("{}ConnectionBuilder", protocol.name.to_case(Case::Pascal));
 
         quote! {
             /// インメモリチャネルベースのConnection（テスト用）
