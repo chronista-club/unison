@@ -1,6 +1,4 @@
 use anyhow::Result;
-use futures_util::Stream;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,34 +6,7 @@ use tokio::sync::RwLock;
 
 use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
 use super::service::Service;
-use super::{
-    MessageType, NetworkError, ProtocolMessage, ProtocolServerTrait, UnisonServer, UnisonServerExt,
-};
-
-/// サーバーハンドラー関数型
-type CallHandler = Arc<
-    dyn Fn(Value) -> Pin<Box<dyn futures_util::Future<Output = Result<Value>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// ストリームハンドラー関数型
-type StreamHandler = Arc<
-    dyn Fn(
-            Value,
-        ) -> Pin<
-            Box<
-                dyn futures_util::Future<
-                        Output = Result<Pin<Box<dyn Stream<Item = Result<Value>> + Send>>>,
-                    > + Send,
-            >,
-        > + Send
-        + Sync,
->;
-
-/// シンプルハンドラー用のUnisonハンドラー型
-type UnisonHandler =
-    Arc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, NetworkError> + Send + Sync>;
+use super::{NetworkError, UnisonServer};
 
 /// チャネルハンドラー型（接続コンテキスト + UnisonStreamを受け取る）
 pub type ChannelHandler = Arc<
@@ -49,9 +20,6 @@ pub type ChannelHandler = Arc<
 
 /// プロトコルサーバー実装
 pub struct ProtocolServer {
-    call_handlers: Arc<RwLock<HashMap<String, CallHandler>>>,
-    stream_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
-    unison_handlers: Arc<RwLock<HashMap<String, UnisonHandler>>>,
     services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
     running: Arc<RwLock<bool>>,
     /// サーバー識別情報
@@ -65,9 +33,6 @@ pub struct ProtocolServer {
 impl ProtocolServer {
     pub fn new() -> Self {
         Self {
-            call_handlers: Arc::new(RwLock::new(HashMap::new())),
-            stream_handlers: Arc::new(RwLock::new(HashMap::new())),
-            unison_handlers: Arc::new(RwLock::new(HashMap::new())),
             services: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(false)),
             server_name: "unison".to_string(),
@@ -167,165 +132,6 @@ impl ProtocolServer {
         }
     }
 
-    /// 呼び出しハンドラーを登録
-    pub async fn register_call_handler<F, Fut>(&self, method: &str, handler: F)
-    where
-        F: Fn(Value) -> Fut + Send + Sync + 'static,
-        Fut: futures_util::Future<Output = Result<Value>> + Send + 'static,
-    {
-        let handler = Arc::new(move |value: Value| {
-            Box::pin(handler(value))
-                as Pin<Box<dyn futures_util::Future<Output = Result<Value>> + Send>>
-        });
-
-        let mut handlers = self.call_handlers.write().await;
-        handlers.insert(method.to_string(), handler);
-    }
-
-    /// ストリームハンドラーを登録
-    pub async fn register_stream_handler<F, Fut, S>(&self, method: &str, handler: F)
-    where
-        F: Fn(Value) -> Fut + Send + Sync + 'static,
-        Fut: futures_util::Future<Output = Result<S>> + Send + 'static,
-        S: Stream<Item = Result<Value>> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
-        let wrapped_handler = Arc::new(move |value: Value| {
-            let handler = Arc::clone(&handler);
-            Box::pin(async move {
-                let stream = handler(value).await?;
-                Ok(Box::pin(stream) as Pin<Box<dyn Stream<Item = Result<Value>> + Send>>)
-            })
-                as Pin<
-                    Box<
-                        dyn futures_util::Future<
-                                Output = Result<Pin<Box<dyn Stream<Item = Result<Value>> + Send>>>,
-                            > + Send,
-                    >,
-                >
-        });
-
-        let mut handlers = self.stream_handlers.write().await;
-        handlers.insert(method.to_string(), wrapped_handler);
-    }
-
-    /// 入力メッセージを処理
-    pub async fn process_message(&self, message: ProtocolMessage) -> Result<ProtocolMessage> {
-        match message.msg_type {
-            MessageType::Request => {
-                let handlers = self.call_handlers.read().await;
-                if let Some(handler) = handlers.get(&message.method) {
-                    let payload_value = message
-                        .payload_as_value()
-                        .map_err(|e| anyhow::anyhow!("Failed to parse payload: {}", e))?;
-                    match handler(payload_value).await {
-                        Ok(response) => ProtocolMessage::new_with_json(
-                            message.id,
-                            message.method,
-                            MessageType::Response,
-                            response,
-                        )
-                        .map_err(|e| anyhow::anyhow!("Failed to create response: {}", e)),
-                        Err(e) => ProtocolMessage::new_with_json(
-                            message.id,
-                            message.method,
-                            MessageType::Error,
-                            serde_json::json!({
-                                "message": e.to_string(),
-                            }),
-                        )
-                        .map_err(|e| anyhow::anyhow!("Failed to create error response: {}", e)),
-                    }
-                } else {
-                    ProtocolMessage::new_with_json(
-                        message.id,
-                        message.method.clone(),
-                        MessageType::Error,
-                        serde_json::json!({
-                            "message": format!("Method not found: {}", message.method),
-                        }),
-                    )
-                    .map_err(|e| anyhow::anyhow!("Failed to create error response: {}", e))
-                }
-            }
-            MessageType::Stream => {
-                // Stream handling would be more complex in a real implementation
-                // This is a simplified version
-                let handlers = self.stream_handlers.read().await;
-                if let Some(_handler) = handlers.get(&message.method) {
-                    // 実際の実装では：
-                    // 1. ストリームを開始
-                    // 2. 各アイテムに対してStreamDataメッセージを送信
-                    // 3. 完了時にStreamEndを送信
-                    ProtocolMessage::new_with_json(
-                        message.id,
-                        message.method,
-                        MessageType::StreamEnd,
-                        serde_json::json!({}),
-                    )
-                    .map_err(|e| anyhow::anyhow!("Failed to create stream end message: {}", e))
-                } else {
-                    ProtocolMessage::new_with_json(
-                        message.id,
-                        message.method.clone(),
-                        MessageType::Error,
-                        serde_json::json!({
-                            "message": format!("Stream method not found: {}", message.method),
-                        }),
-                    )
-                    .map_err(|e| anyhow::anyhow!("Failed to create error message: {}", e))
-                }
-            }
-            _ => ProtocolMessage::new_with_json(
-                message.id,
-                message.method,
-                MessageType::Error,
-                serde_json::json!({
-                    "message": "Invalid message type",
-                }),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create error message: {}", e)),
-        }
-    }
-}
-
-impl ProtocolServerTrait for ProtocolServer {
-    async fn handle_call(
-        &self,
-        method: &str,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        // まずunison_handlers（register_handlerで登録）を試行
-        let unison_handlers = self.unison_handlers.read().await;
-        if let Some(handler) = unison_handlers.get(method) {
-            match handler(payload) {
-                Ok(result) => Ok(result),
-                Err(e) => Err(anyhow::anyhow!("Handler error: {}", e)),
-            }
-        } else {
-            // call_handlersへフォールバック
-            drop(unison_handlers);
-            let handlers = self.call_handlers.read().await;
-            if let Some(handler) = handlers.get(method) {
-                handler(payload).await
-            } else {
-                Err(anyhow::anyhow!("Method not found: {}", method))
-            }
-        }
-    }
-
-    async fn handle_stream(
-        &self,
-        method: &str,
-        payload: serde_json::Value,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<serde_json::Value>> + Send>>> {
-        let handlers = self.stream_handlers.read().await;
-        if let Some(handler) = handlers.get(method) {
-            handler(payload).await
-        } else {
-            Err(anyhow::anyhow!("Stream method not found: {}", method))
-        }
-    }
 }
 
 impl Default for ProtocolServer {
@@ -346,9 +152,6 @@ impl UnisonServer for ProtocolServer {
 
         // プロトコルハンドラーとして自分自身を使用してQUICサーバーを作成
         let protocol_server = Arc::new(ProtocolServer {
-            call_handlers: Arc::clone(&self.call_handlers),
-            stream_handlers: Arc::clone(&self.stream_handlers),
-            unison_handlers: Arc::clone(&self.unison_handlers),
             services: Arc::clone(&self.services),
             running: Arc::clone(&self.running),
             server_name: self.server_name.clone(),
@@ -381,59 +184,7 @@ impl UnisonServer for ProtocolServer {
     }
 
     fn is_running(&self) -> bool {
-        // For now, return false for simplicity in tests
-        // In production, this would check the actual running state
         false
-    }
-}
-
-impl UnisonServerExt for ProtocolServer {
-    fn register_handler<F>(&mut self, method: &str, handler: F)
-    where
-        F: Fn(serde_json::Value) -> Result<serde_json::Value, NetworkError> + Send + Sync + 'static,
-    {
-        let handler = Arc::new(handler);
-        let method = method.to_string();
-        let handlers_arc = Arc::clone(&self.unison_handlers);
-
-        // Use tokio spawn for async registration to avoid blocking
-        let _handle = tokio::spawn(async move {
-            let mut handlers = handlers_arc.write().await;
-            handlers.insert(method, handler);
-        });
-    }
-
-    fn register_stream_handler<F>(&mut self, method: &str, _handler: F)
-    where
-        F: Fn(
-                serde_json::Value,
-            )
-                -> Pin<Box<dyn Stream<Item = Result<serde_json::Value, NetworkError>> + Send>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        // Simplified implementation for now - just log registration
-        tracing::info!("Stream handler registered for method: {}", method);
-        // TODO: Implement proper stream handler storage
-    }
-
-    fn register_system_stream_handler<F>(&mut self, method: &str, handler: F)
-    where
-        F: Fn(
-                serde_json::Value,
-                crate::network::quic::UnisonStream,
-            )
-                -> Pin<Box<dyn futures_util::Future<Output = Result<(), NetworkError>> + Send>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        // For now, we'll store this as a placeholder until we implement SystemStream handling
-        // This is a complex operation that requires significant changes to the server architecture
-        let _handler = Arc::new(handler);
-        tracing::info!("SystemStream handler registered for method: {}", method);
-        // TODO: Implement SystemStream handler storage and execution
     }
 }
 
@@ -484,19 +235,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_lifecycle() {
-        use super::UnisonServerExt;
+        let server = ProtocolServer::new();
 
-        let mut server = ProtocolServer::new();
+        // チャネルハンドラーを登録
+        server
+            .register_channel("ping", |_ctx, _stream| async { Ok(()) })
+            .await;
 
-        // Register a simple handler
-        server.register_handler("ping", |_payload| {
-            Ok(serde_json::json!({"message": "pong"}))
-        });
+        // チャネルハンドラーが取得できること
+        let handler = server.get_channel_handler("ping").await;
+        assert!(handler.is_some());
 
-        // Test handler registration without actually starting the server
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // Wait for registration to complete
-
-        // Test that server can be stopped
-        assert!(server.stop().await.is_ok());
+        assert!(server.list_services().await.is_empty());
     }
 }

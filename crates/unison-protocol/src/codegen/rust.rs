@@ -1,7 +1,8 @@
 use super::CodeGenerator;
 use crate::parser::{
-    Channel, ChannelFrom, ChannelLifetime, ChannelMessage, DefaultValue, Enum, Field, FieldType,
-    Message, Method, MethodMessage, ParsedSchema, Protocol, Service, Stream, TypeRegistry,
+    Channel, ChannelEvent, ChannelMessage, ChannelRequest,
+    DefaultValue, Enum, Field, FieldType, Message, Method, MethodMessage, ParsedSchema, Protocol,
+    Service, Stream, TypeRegistry,
 };
 use anyhow::Result;
 use convert_case::{Case, Casing};
@@ -57,9 +58,7 @@ impl RustGenerator {
             #[allow(unused_imports)]
             use crate::network::{ProtocolClient, ProtocolServer};
             #[allow(unused_imports)]
-            use crate::network::channel::{
-                BidirectionalChannel, ReceiveChannel, RequestChannel, QuicBackedChannel,
-            };
+            use crate::network::channel::UnisonChannel;
         }
     }
 
@@ -332,8 +331,8 @@ impl RustGenerator {
         let method_name = &method.name;
 
         quote! {
-            pub async fn #name(&self, request: #request_type) -> Result<#response_type> {
-                self.inner.call(#method_name, request).await
+            pub async fn #name(&self, channel: &crate::network::channel::UnisonChannel, request: #request_type) -> Result<#response_type> {
+                channel.request(#method_name, serde_json::to_value(request)?).await
             }
         }
     }
@@ -393,7 +392,15 @@ impl RustGenerator {
     ) -> TokenStream {
         let mut tokens = TokenStream::new();
 
-        // send, recv, error の各メッセージ型を生成
+        // 新構文: request/event から構造体を生成
+        for req in &channel.requests {
+            tokens.extend(self.generate_request_structs(req, type_registry));
+        }
+        for evt in &channel.events {
+            tokens.extend(self.generate_event_struct(evt, type_registry));
+        }
+
+        // 旧構文: send/recv/error の各メッセージ型を生成（後方互換）
         for msg in [&channel.send, &channel.recv, &channel.error]
             .iter()
             .filter_map(|m| m.as_ref())
@@ -402,6 +409,71 @@ impl RustGenerator {
         }
 
         tokens
+    }
+
+    /// request ブロックから構造体を生成（リクエスト型 + returns のレスポンス型）
+    fn generate_request_structs(
+        &self,
+        req: &ChannelRequest,
+        type_registry: &TypeRegistry,
+    ) -> TokenStream {
+        let mut tokens = TokenStream::new();
+
+        // リクエスト構造体
+        let name = format_ident!("{}", req.name);
+        if req.fields.is_empty() {
+            tokens.extend(quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name;
+            });
+        } else {
+            let fields: Vec<_> = req
+                .fields
+                .iter()
+                .map(|f| self.generate_field(f, type_registry))
+                .collect();
+            tokens.extend(quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name {
+                    #(#fields),*
+                }
+            });
+        }
+
+        // レスポンス構造体（returns ブロック）
+        if let Some(returns) = &req.returns {
+            tokens.extend(self.generate_channel_message_struct(returns, type_registry));
+        }
+
+        tokens
+    }
+
+    /// event ブロックから構造体を生成
+    fn generate_event_struct(
+        &self,
+        evt: &ChannelEvent,
+        type_registry: &TypeRegistry,
+    ) -> TokenStream {
+        let name = format_ident!("{}", evt.name);
+
+        if evt.fields.is_empty() {
+            quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name;
+            }
+        } else {
+            let fields: Vec<_> = evt
+                .fields
+                .iter()
+                .map(|f| self.generate_field(f, type_registry))
+                .collect();
+            quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct #name {
+                    #(#fields),*
+                }
+            }
+        }
     }
 
     /// 個別のチャネルメッセージ構造体を生成
@@ -450,7 +522,7 @@ impl RustGenerator {
             })
             .collect();
 
-        // QuicBackedChannel版のフィールド
+        // UnisonChannel版のフィールド
         let quic_fields: Vec<_> = protocol
             .channels
             .iter()
@@ -512,56 +584,14 @@ impl RustGenerator {
         }
     }
 
-    /// チャネルの特性に応じたQuicBackedChannel型を決定
-    fn channel_quic_field_type(&self, channel: &Channel) -> TokenStream {
-        let has_send = channel.send.is_some();
-        let has_recv = channel.recv.is_some();
-
-        match (has_send, has_recv) {
-            (true, true) => {
-                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
-                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
-                quote! { QuicBackedChannel<#send_type, #recv_type> }
-            }
-            (true, false) => {
-                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
-                // 受信専用: サーバーからのpushはSendTypeを受信する
-                quote! { QuicBackedChannel<(), #send_type> }
-            }
-            (false, true) => {
-                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
-                quote! { QuicBackedChannel<#recv_type, ()> }
-            }
-            _ => quote! { () },
-        }
+    /// チャネルの QUIC フィールド型を決定（全て UnisonChannel）
+    fn channel_quic_field_type(&self, _channel: &Channel) -> TokenStream {
+        quote! { UnisonChannel }
     }
 
-    /// チャネルの特性に応じたフィールド型を決定
-    fn channel_field_type(&self, channel: &Channel) -> TokenStream {
-        let has_send = channel.send.is_some();
-        let has_recv = channel.recv.is_some();
-
-        match (has_send, has_recv, &channel.lifetime, &channel.from) {
-            // サーバープッシュ（send only, from=Server）: クライアントは受信のみ
-            (true, false, _, ChannelFrom::Server) => {
-                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
-                quote! { ReceiveChannel<#send_type> }
-            }
-            // クライアント→サーバーのトランジェント（send+recv, Transient）: リクエスト-レスポンス
-            (true, true, ChannelLifetime::Transient, _) => {
-                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
-                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
-                quote! { RequestChannel<#send_type, #recv_type> }
-            }
-            // 双方向永続（send+recv, Persistent）: 双方向ストリーム
-            (true, true, ChannelLifetime::Persistent, _) => {
-                let send_type = format_ident!("{}", channel.send.as_ref().unwrap().name);
-                let recv_type = format_ident!("{}", channel.recv.as_ref().unwrap().name);
-                quote! { BidirectionalChannel<#send_type, #recv_type> }
-            }
-            // フォールバック
-            _ => quote! { () },
-        }
+    /// チャネルのフィールド型を決定（全て UnisonChannel）
+    fn channel_field_type(&self, _channel: &Channel) -> TokenStream {
+        quote! { UnisonChannel }
     }
 
     fn format_code(&self, code: &str) -> String {

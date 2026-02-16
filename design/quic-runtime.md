@@ -6,9 +6,9 @@
 
 - **ConnectionContext**: 接続ごとの状態管理（identity、チャネル追跡）
 - **Identity Handshake**: 接続直後のサーバー自己紹介プロトコル
-- **チャネルルーティング**: `__channel:` プレフィックスによるRPCとチャネルの多重化
+- **チャネルルーティング**: `__channel:` プレフィックスによるチャネル多重化
 - **Length-Prefixed Framing**: 4バイトBE長プレフィックスによるフレーム境界
-- **QuicBackedChannel\<S, R\>**: 型安全なQUICストリームラッパー
+- **UnisonChannel**: 統合チャネル型（request/response + event push）
 - **コード生成統合**: `{Protocol}QuicConnection` 構造体の自動生成
 
 全体のアーキテクチャ層における位置付け:
@@ -16,7 +16,7 @@
 ```
 Application Layer
     |
-Service Layer   --- QuicBackedChannel<S, R> (型安全チャネル)
+Service Layer   --- UnisonChannel (統合チャネル: request/response + event)
     |
 Protocol Layer  --- ProtocolMessage / ProtocolFrame
     |
@@ -114,7 +114,7 @@ sequenceDiagram
     Note over S: ctx.set_identity(identity)
 
     S->>C: open_bi() -> ServerIdentity送信
-    Note right of S: method: "__identity"<br/>msg_type: StreamSend<br/>payload: ServerIdentity JSON
+    Note right of S: method: "__identity"<br/>msg_type: Event<br/>payload: ServerIdentity JSON
 
     deactivate S
 
@@ -167,7 +167,7 @@ pub enum ChannelUpdate {
 
 **ファイル**: `crates/unison-protocol/src/network/quic.rs` (`handle_connection` 関数内)
 
-QUIC接続上では、通常のRPC（Request/Response）とチャネル（永続ストリーム）が同一の双方向ストリームを共有する。ルーティングは `ProtocolMessage.method` フィールドのプレフィックスで判別する。
+QUIC接続上では、全通信がチャネルとして処理される。ルーティングは `ProtocolMessage.method` フィールドのプレフィックスで判別する。
 
 ### ルーティング規則
 
@@ -175,7 +175,6 @@ QUIC接続上では、通常のRPC（Request/Response）とチャネル（永続
 |---|---|---|
 | `__channel:{name}` | チャネル | `get_channel_handler` で対応ハンドラに委譲 |
 | `__identity` | Identity | ServerIdentity の送信 |
-| (その他) | RPC | `handle_call` / `handle_stream` でメソッド名解決 |
 
 ### フロー図
 
@@ -187,21 +186,21 @@ flowchart TD
     D --> E{method prefix?}
 
     E -->|"__channel:{name}"| F[チャネルハンドラ]
-    E -->|RPC Request| G[handle_call]
-    E -->|Stream Request| H[handle_stream]
+    E -->|その他 Request| G["process_message (deprecated)"]
 
     F --> I[UnisonStream::from_streams]
     I --> J[handler ctx, stream]
+    J --> K["UnisonChannel で<br/>request/response + event 処理"]
 
-    G --> K[レスポンス送信 + finish]
-    H --> L[ストリームデータ送信ループ]
-    L --> M[StreamEnd送信]
+    G --> L[レスポンス送信 + finish]
 ```
 
-### チャネルハンドラとRPCの違い
+### 通信モデル
 
-- **RPC**: ストリームを開いて1リクエスト送信 → 1レスポンス受信 → `finish()` でクローズ。ストリームは短命。
-- **チャネル**: ストリームを開いた後、`UnisonStream` として生かしたままハンドラに引き渡す。ハンドラ内で `send` / `receive` を繰り返す永続ストリーム。
+Unified Channel 統合により、全通信はチャネル経由で行われる:
+
+- **チャネル内 Request/Response**: `UnisonChannel::request()` でメッセージIDベースの相関。応答は `pending` マップの oneshot で紐付け
+- **チャネル内 Event**: `UnisonChannel::send_event()` で一方向プッシュ。応答不要
 
 ## 5. Length-Prefixed Framing
 
@@ -275,37 +274,38 @@ let request_result = match read_frame(&mut recv_stream).await {
 };
 ```
 
-## 6. QuicBackedChannel\<S, R\>
+## 6. UnisonChannel（統合チャネル型）
 
 **ファイル**: `crates/unison-protocol/src/network/channel.rs`
 
-`QuicBackedChannel<S, R>` は、QUICストリーム上で動作する型安全な双方向チャネルである。`UnisonStream` をラップし、`PhantomData` + `Serialize` / `DeserializeOwned` の型パラメータで送受信メッセージの型安全性を保証する。
+`UnisonChannel` は、全チャネルを統一する型。内部に recv ループを持ち、受信メッセージを Response（pending request の oneshot に送信）と Event（event queue に送信）に振り分ける。
 
 ### 構造体定義
 
 ```rust
-pub struct QuicBackedChannel<S, R> {
+pub struct UnisonChannel {
     stream: Arc<Mutex<UnisonStream>>,
-    _send: PhantomData<S>,
-    _recv: PhantomData<R>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>,
+    event_rx: mpsc::Receiver<ProtocolMessage>,
+    recv_task: JoinHandle<()>,
 }
 
-impl<S, R> QuicBackedChannel<S, R>
-where
-    S: Serialize + Send,
-    R: DeserializeOwned + Send,
-{
-    pub fn new(stream: UnisonStream) -> Self;
-    pub async fn send(&self, msg: S) -> Result<(), NetworkError>;
-    pub async fn recv(&self) -> Result<R, NetworkError>;
-    pub async fn close(&self) -> Result<(), NetworkError>;
-    pub fn is_active(&self) -> bool;
+impl UnisonChannel {
+    /// Request/Response（メッセージIDで紐付け）
+    pub async fn request(&self, method: &str, payload: Value) -> Result<Value, NetworkError>;
+
+    /// 一方向送信（応答不要）
+    pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError>;
+
+    /// イベント受信（サーバーからのプッシュ）
+    pub async fn recv(&mut self) -> Result<ProtocolMessage, NetworkError>;
+
+    /// チャネルを閉じる
+    pub async fn close(&mut self) -> Result<(), NetworkError>;
 }
 ```
 
 ### チャネルの型ファミリー
-
-プロトコルが提供するチャネルの種類に応じて、異なるラッパー型が用意されている:
 
 ```mermaid
 classDiagram
@@ -327,14 +327,14 @@ classDiagram
         -is_active: Arc~AtomicBool~
     }
 
-    class QuicBackedChannel~S R~ {
+    class UnisonChannel {
         -stream: Arc~Mutex~UnisonStream~~
-        -_send: PhantomData~S~
-        -_recv: PhantomData~R~
-        +send(msg: S)
-        +recv() R
+        -pending: Arc~Mutex~HashMap~u64, oneshot::Sender~~
+        -event_rx: mpsc~Receiver~ProtocolMessage~~
+        +request(method, payload) Value
+        +send_event(method, payload)
+        +recv() ProtocolMessage
         +close()
-        +is_active() bool
     }
 
     class StreamSender~T~ {
@@ -347,50 +347,46 @@ classDiagram
         +recv() Option~T~
     }
 
-    class BidirectionalChannel~S R~ {
-        +sender: StreamSender~S~
-        +receiver: StreamReceiver~R~
-    }
-
     SystemStream <|.. UnisonStream
-    UnisonStream --* QuicBackedChannel : wraps
+    UnisonStream --* UnisonChannel : wraps
     StreamSender --* BidirectionalChannel
     StreamReceiver --* BidirectionalChannel
 ```
 
-### インメモリ vs QUIC
+### 本番用 vs テスト用
 
 | 型 | 用途 | トランスポート |
 |---|---|---|
+| `UnisonChannel` | **本番通信** | QUIC双方向ストリーム |
 | `StreamSender<T>` / `StreamReceiver<T>` | テスト、プロセス内通信 | mpsc チャネル |
-| `BidirectionalChannel<S, R>` | テスト、プロセス内通信 | mpsc チャネル |
-| `QuicBackedChannel<S, R>` | 本番通信 | QUIC双方向ストリーム |
 
-### send / recv の内部動作
+### request / recv の内部動作
 
 ```mermaid
 sequenceDiagram
     participant App as アプリケーション
-    participant QBC as QuicBackedChannel
+    participant UC as UnisonChannel
     participant US as UnisonStream
     participant QUIC as QUIC Stream
 
-    App->>QBC: send(msg: S)
-    QBC->>QBC: serde_json::to_value(msg)
-    QBC->>US: SystemStream::send(value)
-    US->>US: ProtocolMessage::new_with_json()
-    US->>US: message.into_frame()
-    US->>QUIC: send_stream.write_all(frame_bytes)
+    App->>UC: request("method", payload)
+    UC->>UC: ProtocolMessage作成 (id=N, type=Request)
+    UC->>UC: pending[N] = oneshot::channel()
+    UC->>US: send(message)
+    US->>QUIC: write_frame(frame_bytes)
 
-    App->>QBC: recv()
-    QBC->>US: SystemStream::receive()
-    US->>QUIC: recv_stream.read_to_end()
-    QUIC-->>US: data bytes
-    US->>US: ProtocolFrame::from_bytes()
-    US->>US: ProtocolMessage::from_frame()
-    US-->>QBC: serde_json::Value
-    QBC->>QBC: serde_json::from_value(value)
-    QBC-->>App: R
+    Note over UC: recv ループが常時稼働
+    QUIC-->>UC: read_frame() -> ProtocolMessage
+    UC->>UC: msg_type == Response?
+    UC->>UC: pending[N].send(response)
+    UC-->>App: oneshot.recv() -> Result<Value>
+
+    App->>UC: recv() (イベント受信)
+    Note over UC: recv ループが Event を検出
+    QUIC-->>UC: read_frame() -> ProtocolMessage
+    UC->>UC: msg_type == Event?
+    UC->>UC: event_rx.send(message)
+    UC-->>App: event_rx.recv() -> ProtocolMessage
 ```
 
 ## 7. コード生成統合
@@ -411,8 +407,8 @@ classDiagram
 
     class ProtocolQuicConnection {
         <<generated: 本番用>>
-        +channel_a: QuicBackedChannel~SendA, RecvA~
-        +channel_b: QuicBackedChannel~(), EventB~
+        +channel_a: UnisonChannel
+        +channel_b: UnisonChannel
     }
 
     class ProtocolConnectionBuilder {
@@ -422,6 +418,8 @@ classDiagram
 
     ProtocolConnectionBuilder <|.. ProtocolQuicConnection
 ```
+
+> **Note**: Unified Channel 統合により、全 QUIC チャネルのフィールド型は `UnisonChannel` に統一された。
 
 ### generate_connection_struct
 
@@ -441,14 +439,11 @@ fn generate_connection_struct(&self, protocol: &Protocol) -> TokenStream {
 
 ### channel_quic_field_type のマッピング
 
-`channel_quic_field_type()` は、チャネルの `send` / `recv` メッセージ定義の有無に基づいてフィールド型を決定する:
+Unified Channel 統合により、全 QUIC チャネルは `UnisonChannel` 型に統一された:
 
-| send | recv | 生成される型 |
-|---|---|---|
-| あり | あり | `QuicBackedChannel<SendType, RecvType>` |
-| あり | なし | `QuicBackedChannel<(), SendType>` |
-| なし | あり | `QuicBackedChannel<RecvType, ()>` |
-| なし | なし | `()` |
+| チャネル定義 | 生成される型 |
+|---|---|
+| 全チャネル | `UnisonChannel` |
 
 ### channel_field_type のマッピング（インメモリ版）
 
@@ -472,7 +467,7 @@ pub trait {Protocol}ConnectionBuilder {
 }
 ```
 
-`build()` の実装では、各チャネルに対して `client.open_channel(channel_name)` を呼び出し、`QuicBackedChannel` を構築する。
+`build()` の実装では、各チャネルに対して `client.open_channel(channel_name)` を呼び出し、`UnisonChannel` を構築する。
 
 ## 関連ドキュメント
 

@@ -1,6 +1,6 @@
-# spec/03: Unison Protocol - Stream Channel 仕様
+# spec/03: Unison Protocol - Unified Channel 仕様
 
-**バージョン**: 0.1.0-draft
+**バージョン**: 1.0.0-draft
 **最終更新**: 2026-02-16
 **ステータス**: Draft
 
@@ -9,27 +9,29 @@
 ## 目次
 
 1. [概要](#1-概要)
-2. [チャネル型一覧](#2-チャネル型一覧)
+2. [UnisonChannel](#2-unisonchannelチャネル統合型)
 3. [KDL スキーマ構文](#3-kdl-スキーマ構文)
 4. [スキーマ例: creo_sync.kdl](#4-スキーマ例-creo_synckdl)
-5. [QuicBackedChannel 仕様](#5-quicbackedchannel-仕様)
+5. [チャネル内部プロトコル](#5-チャネル内部プロトコル)
 6. [チャネルルーティングプロトコル](#6-チャネルルーティングプロトコル)
 7. [ConnectionContext とチャネル管理](#7-connectioncontext-とチャネル管理)
 8. [Identity Handshake](#8-identity-handshake)
-9. [今後の拡張](#9-今後の拡張)
-10. [関連ドキュメント](#10-関連ドキュメント)
+9. [旧構文との互換性](#9-旧構文との互換性)
+10. [今後の拡張](#10-今後の拡張)
+11. [関連ドキュメント](#11-関連ドキュメント)
 
 ---
 
 ## 1. 概要
 
-Stream Channel は Unison Protocol の **Stream-First API** における通信プリミティブである。各チャネルは独立した QUIC ストリームにマッピングされ、Head-of-Line Blocking を回避しつつ、型安全なメッセージ送受信を実現する。
+Unified Channel は Unison Protocol の通信プリミティブである。全ての通信（Request/Response、Event Push）がチャネル上で行われ、各チャネルは独立した QUIC ストリームにマッピングされることで Head-of-Line Blocking を回避する。
 
 ### 1.1 設計目標
 
-- **型安全性**: 送信型 `S` と受信型 `R` をジェネリクスで保証
-- **独立性**: チャネルごとに独立した QUIC ストリームを使用し、HoL Blocking を排除
-- **KDL 駆動**: スキーマ定義からチャネル型を自動生成
+- **統一性**: Request/Response と Event Push を単一のチャネル型で表現
+- **独立性**: チャネルごとに独立した QUIC ストリームを使用し、チャネル間 HoL Blocking を排除
+- **チャネル内シンプルさ**: 1チャネル内では多重化を許容し、過度な複雑さを避ける
+- **KDL 駆動**: スキーマ定義からチャネル型と構造体を自動生成
 - **ライフサイクル管理**: persistent / transient の 2 種類のライフタイムをサポート
 
 ### 1.2 アーキテクチャ上の位置づけ
@@ -41,135 +43,122 @@ graph TB
     end
 
     subgraph "チャネル層"
-        BC[BidirectionalChannel]
-        RC[ReceiveChannel]
-        ReqC[RequestChannel]
-        QBC[QuicBackedChannel]
+        UC[UnisonChannel<br/>request + event 統合型]
     end
 
     subgraph "ストリーム層"
-        SS[StreamSender / StreamReceiver]
-        US[UnisonStream]
+        US[UnisonStream<br/>QUIC ストリーム抽象]
     end
 
     subgraph "トランスポート層"
         QUIC[QUIC Connection]
     end
 
-    App --> BC
-    App --> RC
-    App --> ReqC
-    App --> QBC
-    BC --> SS
-    RC --> SS
-    QBC --> US
-    SS --> QUIC
+    App --> UC
+    UC --> US
     US --> QUIC
 ```
 
-インメモリチャネル (`BidirectionalChannel`, `ReceiveChannel`, `RequestChannel`) は `tokio::sync::mpsc` を使用し、プロセス内通信に適する。ネットワーク越しの通信には `QuicBackedChannel` を使用し、実際の QUIC ストリーム上で動作する。
+旧アーキテクチャでは `BidirectionalChannel`, `ReceiveChannel`, `RequestChannel`, `QuicBackedChannel` の4型が存在したが、`UnisonChannel` に統一される。
 
 ---
 
-## 2. チャネル型一覧
+## 2. UnisonChannel（チャネル統合型）
 
-### 2.1 BidirectionalChannel<S, R>
+### 2.1 構造
 
-双方向チャネル。送信型 `S` と受信型 `R` を独立して指定できる。
+`UnisonChannel` は Request/Response と Event の両パターンをサポートする統合チャネル型である。
 
 ```rust
-pub struct BidirectionalChannel<S, R> {
-    pub sender: StreamSender<S>,
-    pub receiver: StreamReceiver<R>,
+pub struct UnisonChannel {
+    /// QUIC ストリームへの参照
+    stream: Arc<Mutex<UnisonStream>>,
+    /// 応答待ちの Request を管理（id → oneshot::Sender）
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>,
+    /// Event 受信キュー
+    event_rx: mpsc::Receiver<ProtocolMessage>,
+    /// バックグラウンド受信タスク
+    recv_task: JoinHandle<()>,
 }
 ```
 
-**用途**: クライアントとサーバー双方がメッセージを送受信するケース（例: messaging チャネル）
-
-**KDL での `from` 属性**: `"either"`
-
-### 2.2 ReceiveChannel<T>
-
-受信専用チャネル。サーバーからのプッシュ通知やイベント配信に使用する。
+### 2.2 API
 
 ```rust
-pub struct ReceiveChannel<T> {
-    pub receiver: StreamReceiver<T>,
+impl UnisonChannel {
+    /// Request/Response パターン
+    /// メッセージ ID を自動生成し、pending マップに登録。
+    /// Response が返るまで await する。
+    pub async fn request(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, NetworkError>;
+
+    /// 一方向 Event 送信（応答不要）
+    pub async fn send_event(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<(), NetworkError>;
+
+    /// Event 受信（サーバーからのプッシュ、またはその他の非 Response メッセージ）
+    pub async fn recv(&mut self) -> Result<ProtocolMessage, NetworkError>;
+
+    /// チャネルを閉じる
+    pub async fn close(&mut self) -> Result<(), NetworkError>;
 }
 ```
 
-**用途**: サーバーからクライアントへの一方向データ配信（例: events チャネル、urgent チャネル）
+### 2.3 内部 recv ループ
 
-**KDL での `from` 属性**: `"server"`
+`UnisonChannel` は構築時にバックグラウンドタスクを起動し、受信メッセージを振り分ける。
 
-### 2.3 RequestChannel<Req, Res>
-
-リクエスト-レスポンスチャネル。transient な RPC パターンに使用する。内部的に `oneshot::Sender` でレスポンスを返す。
-
-```rust
-pub struct RequestChannel<Req, Res> {
-    _req: PhantomData<Req>,
-    _res: PhantomData<Res>,
-    pub tx: mpsc::Sender<(Req, tokio::sync::oneshot::Sender<Res>)>,
-}
+```mermaid
+flowchart TD
+    START[recv ループ開始] --> READ[stream.receive()]
+    READ --> CHECK{msg_type?}
+    CHECK -->|Response| PENDING[pending マップから<br/>oneshot::Sender を取得]
+    PENDING --> RESOLVE[oneshot で送信]
+    RESOLVE --> READ
+    CHECK -->|Event| EVENT[event_rx に送信]
+    EVENT --> READ
+    CHECK -->|Error| ERROR_CHECK{response_to > 0?}
+    ERROR_CHECK -->|Yes| PENDING_ERR[pending マップの<br/>対応する Request を<br/>Error で解決]
+    PENDING_ERR --> READ
+    ERROR_CHECK -->|No| EVENT
+    CHECK -->|接続断| END[ループ終了<br/>全 pending を Error で解決]
 ```
 
-**用途**: 短命なリクエスト-レスポンス通信（例: query チャネル）
+### 2.4 旧型との対応表
 
-**KDL での `lifetime` 属性**: `"transient"`
-
-### 2.4 StreamSender<T> / StreamReceiver<T>
-
-低レベルの送信・受信ハンドル。`tokio::sync::mpsc` をラップし、インメモリチャネルの基盤となる。
-
-```rust
-pub struct StreamSender<T> {
-    tx: mpsc::Sender<T>,
-}
-
-impl<T> StreamSender<T> {
-    pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>>;
-    pub fn is_closed(&self) -> bool;
-}
-
-pub struct StreamReceiver<T> {
-    rx: mpsc::Receiver<T>,
-}
-
-impl<T> StreamReceiver<T> {
-    pub async fn recv(&mut self) -> Option<T>;
-}
-```
-
-**用途**: `BidirectionalChannel` と `ReceiveChannel` の内部構成要素
-
-### 2.5 型の選択基準
-
-| 条件 | 推奨チャネル型 |
-|------|---------------|
-| 双方向 + インメモリ | `BidirectionalChannel<S, R>` |
-| 受信専用 + インメモリ | `ReceiveChannel<T>` |
-| リクエスト-レスポンス + インメモリ | `RequestChannel<Req, Res>` |
-| ネットワーク越し + 型安全 | `QuicBackedChannel<S, R>` |
+| 旧チャネル型 | UnisonChannel での代替 |
+|------------|----------------------|
+| `QuicBackedChannel<S, R>` | `UnisonChannel` + `request()` |
+| `BidirectionalChannel<S, R>` | `UnisonChannel` + `send_event()` / `recv()` |
+| `ReceiveChannel<T>` | `UnisonChannel` + `recv()` |
+| `RequestChannel<Req, Res>` | `UnisonChannel` + `request()` |
 
 ---
 
 ## 3. KDL スキーマ構文
 
-### 3.1 channel キーワード
-
-チャネルは KDL スキーマ内で `channel` キーワードを使って定義する。
+### 3.1 新構文: `request` / `event`
 
 ```kdl
 channel "<name>" from="<direction>" lifetime="<lifetime>" {
-    send "<MessageType>" {
+    // Request/Response パターン
+    request "<RequestName>" {
         field "<name>" type="<type>" [required=#true]
+
+        returns "<ResponseName>" {
+            field "<name>" type="<type>"
+        }
     }
-    recv "<MessageType>" {
+
+    // 一方向イベント
+    event "<EventName>" {
         field "<name>" type="<type>" [required=#true]
-    }
-    error "<ErrorType>" {
-        field "<name>" type="<type>"
     }
 }
 ```
@@ -186,47 +175,100 @@ channel "<name>" from="<direction>" lifetime="<lifetime>" {
 
 ### 3.3 メッセージブロック
 
-- **`send`**: このチャネルで送信されるメッセージ型を定義
-- **`recv`**: このチャネルで受信されるメッセージ型を定義
-- **`error`**: このチャネル固有のエラー型を定義
+| ブロック | ネスト | 説明 |
+|---------|-------|------|
+| `request` | トップレベル | Request/Response パターン定義 |
+| `returns` | `request` 内 | レスポンス型定義 |
+| `event` | トップレベル | 一方向イベント定義 |
 
-`send` のみの場合は一方向チャネル、`send` + `recv` の場合は双方向チャネルとなる。
+### 3.4 チャネルパターンの設計指針
 
-### 3.4 from 属性と Rust 型のマッピング
-
-| `from` | `lifetime` | 生成される Rust 型 |
-|--------|------------|-------------------|
-| `"client"` | `"persistent"` | `BidirectionalChannel<Send, Recv>` |
-| `"server"` | `"persistent"` | `ReceiveChannel<Send>` |
-| `"either"` | `"persistent"` | `BidirectionalChannel<Send, Recv>` |
-| `"client"` | `"transient"` | `RequestChannel<Send, Recv>` |
-| `"server"` | `"transient"` | `ReceiveChannel<Send>` |
-| ネットワーク越し | 任意 | `QuicBackedChannel<Send, Recv>` |
+| パターン | 推奨構文 | 例 |
+|---------|---------|-----|
+| クエリ（応答あり） | `request` + `returns` | DB クエリ、API 呼び出し |
+| 通知（応答なし） | `event` | ログ配信、アラート |
+| エラー通知 | `event`（エラー型として） | 非同期エラー報告 |
+| 双方向メッセージング | `request` + `event` の組み合わせ | チャット、制御 |
 
 ---
 
 ## 4. スキーマ例: creo_sync.kdl
 
-以下は Creo Sync プロトコルの完全なチャネル定義である。5 つのチャネルが 3 つのプレーン（Control / Data / Messaging）に分かれている。
-
 ### 4.1 全体構造
 
 ```kdl
-protocol "creo-sync" version="1.0.0" {
+protocol "creo-sync" version="2.0.0" {
     namespace "club.chronista.sync"
 
     // === Control Plane ===
-    channel "control" from="client" lifetime="persistent" { ... }
+    channel "control" from="client" lifetime="persistent" {
+        request "Subscribe" {
+            field "category" type="string"
+            field "tags" type="string"
+
+            returns "Ack" {
+                field "status" type="string"
+                field "channel_ref" type="string"
+            }
+        }
+    }
 
     // === Data Plane ===
-    channel "events" from="server" lifetime="persistent" { ... }
-    channel "query" from="client" lifetime="transient" { ... }
+    channel "events" from="server" lifetime="persistent" {
+        event "MemoryEvent" {
+            field "event_type" type="string" required=#true
+            field "memory_id" type="string" required=#true
+            field "category" type="string"
+            field "from" type="string"
+            field "timestamp" type="string"
+        }
+    }
+
+    channel "query" from="client" lifetime="persistent" {
+        request "Query" {
+            field "method" type="string" required=#true
+            field "params" type="json"
+
+            returns "Result" {
+                field "data" type="json"
+            }
+        }
+
+        event "QueryError" {
+            field "code" type="string"
+            field "message" type="string"
+        }
+    }
 
     // === Messaging Plane ===
-    channel "messaging" from="either" lifetime="persistent" { ... }
+    channel "messaging" from="either" lifetime="persistent" {
+        request "SendMessage" {
+            field "from" type="string" required=#true
+            field "to" type="string"
+            field "content" type="string" required=#true
+            field "thread" type="string"
+
+            returns "MessageAck" {
+                field "status" type="string"
+            }
+        }
+
+        event "CCMessage" {
+            field "from" type="string" required=#true
+            field "to" type="string"
+            field "content" type="string" required=#true
+            field "thread" type="string"
+        }
+    }
 
     // === Urgent Plane ===
-    channel "urgent" from="server" lifetime="transient" { ... }
+    channel "urgent" from="server" lifetime="transient" {
+        event "Alert" {
+            field "level" type="string" required=#true
+            field "title" type="string" required=#true
+            field "body" type="string"
+        }
+    }
 }
 ```
 
@@ -234,121 +276,58 @@ protocol "creo-sync" version="1.0.0" {
 
 #### control チャネル
 
-```kdl
-channel "control" from="client" lifetime="persistent" {
-    send "Subscribe" {
-        field "category" type="string"
-        field "tags" type="string"
-    }
-    recv "Ack" {
-        field "status" type="string"
-        field "channel_ref" type="string"
-    }
-}
-```
-
-- **方向**: クライアント -> サーバー（send）、サーバー -> クライアント（recv）
-- **ライフタイム**: persistent -- 接続中ずっと維持
-- **用途**: クライアントがサブスクリプションを登録し、サーバーが確認応答を返す制御プレーン
-- **生成型**: `QuicBackedChannel<Subscribe, Ack>`
+- **方向**: クライアント -> サーバー
+- **ライフタイム**: persistent
+- **パターン**: `request` Subscribe → `returns` Ack
+- **用途**: サブスクリプション管理。クライアントがカテゴリ/タグを登録し、サーバーが確認応答を返す
 
 #### events チャネル
 
-```kdl
-channel "events" from="server" lifetime="persistent" {
-    send "MemoryEvent" {
-        field "event_type" type="string" required=#true
-        field "memory_id" type="string" required=#true
-        field "category" type="string"
-        field "from" type="string"
-        field "timestamp" type="string"
-    }
-}
-```
-
-- **方向**: サーバー -> クライアント（send のみ）
+- **方向**: サーバー -> クライアント
 - **ライフタイム**: persistent
-- **用途**: サーバーがメモリイベントをリアルタイムにプッシュ配信するデータプレーン
-- **生成型**: `QuicBackedChannel<MemoryEvent, ()>` (受信側から見ると `ReceiveChannel<MemoryEvent>`)
+- **パターン**: `event` MemoryEvent
+- **用途**: メモリイベントのリアルタイムプッシュ配信
 
 #### query チャネル
 
-```kdl
-channel "query" from="client" lifetime="transient" {
-    send "Query" {
-        field "method" type="string" required=#true
-        field "params" type="json"
-    }
-    recv "Result" {
-        field "data" type="json"
-    }
-    error "QueryError" {
-        field "code" type="string"
-        field "message" type="string"
-    }
-}
-```
-
-- **方向**: クライアント -> サーバー（send）、サーバー -> クライアント（recv）
-- **ライフタイム**: transient -- リクエストごとに開閉
-- **用途**: クエリ実行と結果取得。エラー型 `QueryError` を持つ
-- **生成型**: `QuicBackedChannel<Query, Result>` + エラー型 `QueryError`
+- **方向**: クライアント -> サーバー
+- **ライフタイム**: persistent
+- **パターン**: `request` Query → `returns` Result + `event` QueryError
+- **用途**: クエリ実行と結果取得。非同期エラーは Event で通知
 
 #### messaging チャネル
 
-```kdl
-channel "messaging" from="either" lifetime="persistent" {
-    send "CCMessage" {
-        field "from" type="string" required=#true
-        field "to" type="string"
-        field "content" type="string" required=#true
-        field "thread" type="string"
-    }
-    recv "CCMessage"
-}
-```
-
-- **方向**: 双方向（`from="either"`）
+- **方向**: 双方向
 - **ライフタイム**: persistent
-- **用途**: クライアント・サーバー双方が同一の `CCMessage` 型を送受信するメッセージングプレーン
-- **生成型**: `QuicBackedChannel<CCMessage, CCMessage>`
+- **パターン**: `request` SendMessage → `returns` MessageAck + `event` CCMessage
+- **用途**: メッセージ送信（確認応答あり）とメッセージ受信（プッシュ）
 
 #### urgent チャネル
 
-```kdl
-channel "urgent" from="server" lifetime="transient" {
-    send "Alert" {
-        field "level" type="string" required=#true
-        field "title" type="string" required=#true
-        field "body" type="string"
-    }
-}
-```
-
-- **方向**: サーバー -> クライアント（send のみ）
-- **ライフタイム**: transient -- アラートごとに開閉
-- **用途**: 緊急通知の配信
-- **生成型**: `QuicBackedChannel<Alert, ()>`
+- **方向**: サーバー -> クライアント
+- **ライフタイム**: transient
+- **パターン**: `event` Alert
+- **用途**: 緊急アラートの配信
 
 ### 4.3 プレーン構成図
 
 ```mermaid
 graph LR
     subgraph "Control Plane"
-        C[control<br/>persistent<br/>client -> server]
+        C[control<br/>persistent<br/>request/returns]
     end
 
     subgraph "Data Plane"
-        E[events<br/>persistent<br/>server -> client]
-        Q[query<br/>transient<br/>client -> server]
+        E[events<br/>persistent<br/>event only]
+        Q[query<br/>persistent<br/>request + event]
     end
 
     subgraph "Messaging Plane"
-        M[messaging<br/>persistent<br/>bidirectional]
+        M[messaging<br/>persistent<br/>request + event]
     end
 
     subgraph "Urgent Plane"
-        U[urgent<br/>transient<br/>server -> client]
+        U[urgent<br/>transient<br/>event only]
     end
 
     Client[Client] --> C
@@ -365,76 +344,78 @@ graph LR
 
 ---
 
-## 5. QuicBackedChannel 仕様
+## 5. チャネル内部プロトコル
 
-### 5.1 構造
+### 5.1 メッセージ振り分け
 
-`QuicBackedChannel<S, R>` は実際の QUIC ストリームをラップし、`Serialize` / `DeserializeOwned` のトレイト境界で型安全性を保証する。
+`UnisonChannel` 内の recv ループは、受信メッセージを `msg_type` に基づいて振り分ける。
 
-```rust
-pub struct QuicBackedChannel<S, R> {
-    stream: Arc<Mutex<UnisonStream>>,
-    _send: PhantomData<S>,
-    _recv: PhantomData<R>,
-}
+```mermaid
+graph TB
+    RECV[受信メッセージ] --> TYPE{msg_type}
+    TYPE -->|Response| PENDING["pending マップ検索<br/>(response_to → oneshot)"]
+    PENDING --> FOUND{見つかった?}
+    FOUND -->|Yes| SEND_ONESHOT[oneshot で返却]
+    FOUND -->|No| DROP[ログ出力して破棄]
+    TYPE -->|Event| EVENT_TX[event_rx に送信]
+    TYPE -->|Error| ERR_CHECK{response_to > 0?}
+    ERR_CHECK -->|Yes| PENDING_ERR[pending を Error で解決]
+    ERR_CHECK -->|No| EVENT_TX
+    TYPE -->|Request| HANDLER[ハンドラーで処理<br/>（サーバー側）]
 ```
 
-**型パラメータ**:
-- `S: Serialize + Send` -- 送信メッセージ型
-- `R: DeserializeOwned + Send` -- 受信メッセージ型
+### 5.2 Pending Request マップ
 
-### 5.2 API
+Request/Response の相関に使用する内部データ構造。
 
 ```rust
-impl<S, R> QuicBackedChannel<S, R>
-where
-    S: Serialize + Send,
-    R: DeserializeOwned + Send,
-{
-    /// UnisonStream からチャネルを作成
-    pub fn new(stream: UnisonStream) -> Self;
-
-    /// 型安全なメッセージ送信
-    /// 内部で serde_json::to_value -> SystemStream::send を実行
-    pub async fn send(&self, msg: S) -> Result<(), NetworkError>;
-
-    /// 型安全なメッセージ受信
-    /// 内部で SystemStream::receive -> serde_json::from_value を実行
-    pub async fn recv(&self) -> Result<R, NetworkError>;
-
-    /// チャネルを閉じる
-    pub async fn close(&self) -> Result<(), NetworkError>;
-
-    /// チャネルがアクティブか確認
-    pub fn is_active(&self) -> bool;
-}
+/// key: メッセージ ID, value: レスポンスの送信先
+pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>
 ```
 
-### 5.3 シリアライゼーションフロー
+**ライフサイクル**:
+1. `request()` 呼び出し時に `(id, oneshot::Sender)` を登録
+2. recv ループが対応する Response を受信したら、`oneshot::Sender` でレスポンスを送信
+3. タイムアウトまたは接続断の場合、残存する全 pending を Error で解決
+
+### 5.3 Event キュー
+
+Event メッセージは `mpsc::Receiver` 経由でアプリケーションに配信される。
+
+```rust
+/// バッファ付き Event キュー
+event_tx: mpsc::Sender<ProtocolMessage>,   // recv ループ内で使用
+event_rx: mpsc::Receiver<ProtocolMessage>, // recv() メソッドで消費
+```
+
+### 5.4 シリアライゼーションフロー
 
 ```mermaid
 sequenceDiagram
     participant App as アプリケーション
-    participant QBC as QuicBackedChannel
+    participant UC as UnisonChannel
     participant Stream as UnisonStream
     participant QUIC as QUIC Stream
 
-    Note over App,QUIC: 送信フロー
-    App->>QBC: send(msg: S)
-    QBC->>QBC: serde_json::to_value(msg)
-    QBC->>Stream: SystemStream::send(value)
+    Note over App,QUIC: Request 送信
+    App->>UC: request("Query", payload)
+    UC->>UC: id生成, pending登録
+    UC->>Stream: ProtocolMessage(Request)
     Stream->>QUIC: write_frame(bytes)
 
-    Note over App,QUIC: 受信フロー
+    Note over App,QUIC: Response 受信
     QUIC->>Stream: read_frame(bytes)
-    Stream->>QBC: SystemStream::receive() -> Value
-    QBC->>QBC: serde_json::from_value::<R>(value)
-    QBC->>App: Ok(msg: R)
+    Stream->>UC: ProtocolMessage(Response)
+    UC->>UC: pending解決 (oneshot)
+    UC->>App: Ok(value)
+
+    Note over App,QUIC: Event 受信
+    QUIC->>Stream: read_frame(bytes)
+    Stream->>UC: ProtocolMessage(Event)
+    UC->>UC: event_rx に送信
+    App->>UC: recv()
+    UC->>App: Ok(ProtocolMessage)
 ```
-
-### 5.4 並行アクセス
-
-`QuicBackedChannel` は内部で `Arc<Mutex<UnisonStream>>` を使用しているため、複数のタスクから安全にアクセス可能である。ただし、`send` と `recv` は排他ロックを取得するため、高頻度の並行アクセスではボトルネックとなる可能性がある。
 
 ---
 
@@ -442,7 +423,7 @@ sequenceDiagram
 
 ### 6.1 チャネル識別メソッド
 
-チャネルの開設には `__channel:{name}` 形式のメソッド名を使用する。これは通常の RPC メソッドとは異なる予約済みプレフィックスである。
+チャネルの開設には `__channel:{name}` 形式のメソッド名を使用する。
 
 ```
 __channel:control
@@ -461,23 +442,21 @@ sequenceDiagram
     participant Server as ProtocolServer
 
     Client->>QUIC: open_bi() -- 新しい双方向ストリームを開く
-    Client->>QUIC: write_frame(ProtocolMessage)<br/>method: "__channel:events"<br/>type: BidirectionalStream
+    Client->>QUIC: write_frame(ProtocolMessage)<br/>method: "__channel:events"<br/>type: Request
 
     QUIC->>Server: 新ストリーム受信
-    Server->>Server: method解析<br/>"__channel:" プレフィックスを検出
+    Server->>Server: method 解析<br/>"__channel:" プレフィックスを検出
     Server->>Server: channel_handlers からハンドラー取得
 
     alt ハンドラーが存在する
         Server->>Server: handler(context, stream) を実行
-        Note over Client,Server: チャネル確立完了<br/>以降は型安全な send/recv が可能
+        Note over Client,Server: UnisonChannel 確立完了
     else ハンドラーが存在しない
         Server->>Client: Error: Channel not found
     end
 ```
 
 ### 6.3 サーバー側のチャネル登録
-
-サーバーは `register_channel` メソッドでチャネルハンドラーを登録する。
 
 ```rust
 pub type ChannelHandler = Arc<
@@ -498,38 +477,30 @@ impl ProtocolServer {
 }
 ```
 
-ハンドラーは `ConnectionContext`（接続状態）と `UnisonStream`（QUIC ストリーム）を受け取り、チャネル固有のロジックを実行する。
-
 ### 6.4 クライアント側のチャネル開設
-
-クライアントは `open_channel` メソッドでチャネルを開く。型パラメータで送受信メッセージの型を指定する。
 
 ```rust
 impl ProtocolClient {
-    pub async fn open_channel<S, R>(
+    /// UnisonChannel を返す
+    pub async fn open_channel(
         &self,
         channel_name: &str,
-    ) -> Result<QuicBackedChannel<S, R>, NetworkError>
-    where
-        S: Serialize + Send,
-        R: DeserializeOwned + Send;
+    ) -> Result<UnisonChannel, NetworkError>;
 }
 ```
 
 内部処理:
-
 1. QUIC コネクション上で新しい双方向ストリームを開く (`open_bi()`)
 2. `__channel:{name}` メソッドでチャネル識別メッセージを送信
-3. `UnisonStream` を作成し `QuicBackedChannel` でラップ
-4. `ConnectionContext` にチャネルを登録
+3. `UnisonStream` を作成
+4. `UnisonChannel` を構築（recv ループを起動）
+5. `ConnectionContext` にチャネルを登録
 
 ---
 
 ## 7. ConnectionContext とチャネル管理
 
 ### 7.1 ConnectionContext
-
-各 QUIC 接続に対して `ConnectionContext` が 1 つ作成され、Identity 情報とアクティブチャネルを追跡する。
 
 ```rust
 pub struct ConnectionContext {
@@ -557,17 +528,13 @@ pub enum ChannelDirection {
 stateDiagram-v2
     [*] --> Registered: register_channel()
     Registered --> Active: open_channel() / ストリーム確立
-    Active --> Active: send() / recv()
+    Active --> Active: request() / send_event() / recv()
     Active --> Closed: close() / エラー
     Closed --> [*]: remove_channel()
 
-    note right of Registered
-        ConnectionContext に登録済み
-        stream_id が 0 の場合あり
-    end note
-
     note right of Active
-        QUIC ストリーム上で通信中
+        UnisonChannel が構築済み
+        recv ループが稼働中
     end note
 ```
 
@@ -576,8 +543,6 @@ stateDiagram-v2
 ## 8. Identity Handshake
 
 ### 8.1 ServerIdentity
-
-サーバーは接続時に `ServerIdentity` を送信し、利用可能なチャネルの一覧を通知する。
 
 ```rust
 pub struct ServerIdentity {
@@ -596,80 +561,80 @@ pub struct ChannelInfo {
 }
 ```
 
-### 8.2 ChannelDirection
-
-```rust
-pub enum ChannelDirection {
-    ServerToClient,
-    ClientToServer,
-    Bidirectional,
-}
-```
-
-### 8.3 ChannelStatus
-
-```rust
-pub enum ChannelStatus {
-    Available,    // 利用可能
-    Busy,         // 処理中（新規接続を受け付けない）
-    Unavailable,  // 利用不可
-}
-```
-
-### 8.4 ChannelUpdate
-
-チャネルの動的な追加・削除・状態変更をリアルタイムに通知する。
-
-```rust
-pub enum ChannelUpdate {
-    Added(ChannelInfo),
-    Removed(String),
-    StatusChanged { name: String, status: ChannelStatus },
-}
-```
-
-### 8.5 Identity Handshake シーケンス
+### 8.2 Handshake シーケンス
 
 ```mermaid
 sequenceDiagram
     participant Client as ProtocolClient
     participant Server as ProtocolServer
 
-    Client->>Server: QUIC接続確立
+    Client->>Server: QUIC 接続確立
     Server->>Server: build_identity()<br/>登録済みチャネルから ServerIdentity 構築
-    Server->>Client: ProtocolMessage<br/>method: "__identity"<br/>type: StreamSend<br/>payload: ServerIdentity (JSON)
+    Server->>Client: ProtocolMessage<br/>method: "__identity"<br/>type: Event<br/>payload: ServerIdentity (JSON)
 
     Client->>Client: receive_identity()<br/>ServerIdentity をパースして<br/>ConnectionContext に保存
 
-    Note over Client,Server: Identity Handshake 完了<br/>クライアントはサーバーの<br/>チャネル一覧を認識
+    Note over Client,Server: Identity Handshake 完了
 
-    Client->>Server: open_channel("events")
-    Client->>Server: open_channel("messaging")
+    Client->>Server: open_channel("query") → UnisonChannel
+    Client->>Server: open_channel("events") → UnisonChannel
 ```
 
 ---
 
-## 9. 今後の拡張
+## 9. 旧構文との互換性
 
-### 9.1 計画中の機能
+### 9.1 KDL 構文マッピング
+
+旧 `send`/`recv`/`error` 構文は後方互換のためパーサーが認識するが、新規スキーマでは非推奨。
+
+| 旧構文 | 新構文 | 変換ルール |
+|--------|--------|-----------|
+| `send "X" { ... }` + `recv "Y" { ... }` | `request "X" { ... returns "Y" { ... } }` | send を request に、recv を returns に |
+| `send "X" { ... }` のみ | `event "X" { ... }` | 一方向メッセージは event に |
+| `error "E" { ... }` | `event "E" { ... }` | エラー型も event として扱う |
+
+### 9.2 Rust 型マッピング
+
+| 旧型 | 新型 | 備考 |
+|------|------|------|
+| `QuicBackedChannel<S, R>` | `UnisonChannel` | ジェネリクス不要に |
+| `BidirectionalChannel<S, R>` | `UnisonChannel` | インメモリ用途も統一 |
+| `ReceiveChannel<T>` | `UnisonChannel` | recv() のみ使用 |
+| `RequestChannel<Req, Res>` | `UnisonChannel` | request() を使用 |
+
+### 9.3 API マッピング
+
+| 旧 API | 新 API | 備考 |
+|--------|--------|------|
+| `channel.send(msg)` | `channel.send_event(method, payload)` | JSON Value ベースに |
+| `channel.recv()` | `channel.recv()` | ProtocolMessage を返す |
+| `client.call(method, params)` | `channel.request(method, payload)` | チャネル経由に |
+| `client.stream(method, params)` | `channel.recv()` ループ | Event として受信 |
+
+---
+
+## 10. 今後の拡張
+
+### 10.1 計画中の機能
 
 - **バックプレッシャー制御**: チャネルごとのフロー制御メカニズム
 - **チャネルグループ**: 複数チャネルの一括管理とトランザクション
 - **暗号化チャネル**: チャネルレベルでの追加暗号化
 - **チャネルメトリクス**: スループット、レイテンシー、エラー率の自動計測
 
-### 9.2 WASM 対応
+### 10.2 WASM 対応
 
-WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTransport をフォールバックトランスポートとして検討中。チャネル API は同一のまま、トランスポート層のみ差し替え可能な設計とする。
+WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTransport をフォールバックトランスポートとして検討中。UnisonChannel API は同一のまま、トランスポート層のみ差し替え可能な設計とする。
 
 ---
 
-## 10. 関連ドキュメント
+## 11. 関連ドキュメント
 
 ### 仕様書
 
-- [spec/01: コアネットワーク](../01-core-concept/SPEC.md) - トランスポート層（QUIC）
-- [spec/02: RPC プロトコル](../02-protocol-rpc/SPEC.md) - KDL ベース RPC 層
+- [spec/01: コアコンセプト](../01-core-concept/SPEC.md) - トランスポート層（QUIC）
+- [spec/02: Unified Channel プロトコル](../02-protocol-rpc/SPEC.md) - KDL スキーマとメッセージフロー
 
 ### 設計ドキュメント
 
@@ -686,7 +651,7 @@ WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTrans
 
 ### 実装
 
-- [channel.rs](../../crates/unison-protocol/src/network/channel.rs) - チャネル型の実装
+- [channel.rs](../../crates/unison-protocol/src/network/channel.rs) - UnisonChannel 実装
 - [identity.rs](../../crates/unison-protocol/src/network/identity.rs) - Identity 関連型
 - [context.rs](../../crates/unison-protocol/src/network/context.rs) - ConnectionContext
 - [client.rs](../../crates/unison-protocol/src/network/client.rs) - open_channel 実装
@@ -694,6 +659,6 @@ WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTrans
 
 ---
 
-**仕様バージョン**: 0.1.0-draft
+**仕様バージョン**: 1.0.0-draft
 **最終更新**: 2026-02-16
 **ステータス**: Draft

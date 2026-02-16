@@ -17,18 +17,15 @@
 //! # use anyhow::Result;
 //! # #[tokio::main]
 //! # async fn main() -> Result<()> {
-//! use unison::{UnisonProtocol, UnisonServer, UnisonServerExt, NetworkError};
+//! use unison::{UnisonProtocol, NetworkError};
 //!
 //! // プロトコルスキーマを読み込み
 //! let mut protocol = UnisonProtocol::new();
 //! // protocol.load_schema(include_str!("../schemas/ping_pong.kdl"))?;
 //!
-//! // サーバーを作成
-//! let mut server = protocol.create_server();
-//! server.register_handler("ping", |payload| {
-//!     // pingリクエストを処理
-//!     Ok(serde_json::json!({"message": "pong"})) as Result<serde_json::Value, NetworkError>
-//! });
+//! // サーバーを作成し、チャネルハンドラーを登録
+//! let server = protocol.create_server();
+//! // server.register_channel("query", |ctx, stream| async { Ok(()) }).await;
 //! // server.listen("127.0.0.1:8080").await?;
 //! # Ok(())
 //! # }
@@ -74,7 +71,7 @@ use parser::{ParseError as UnisonParseError, ParsedSchema, SchemaParser};
 
 // よく使用されるトレイトとクライアント/サーバーの再エクスポート
 pub use network::{
-    NetworkError, ProtocolClient, ProtocolServer, UnisonClient, UnisonServer, UnisonServerExt,
+    NetworkError, ProtocolClient, ProtocolServer, UnisonChannel, UnisonClient, UnisonServer,
 };
 
 /// Unison Protocolのメインエントリポイント

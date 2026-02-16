@@ -1,122 +1,224 @@
-//! Channel: Stream-First APIの通信プリミティブ
+//! Channel: Unified Channel 通信プリミティブ
 //!
 //! 各ChannelはQUICストリームにマッピングされ、
 //! 独立したHoL Blocking境界を形成する。
 //!
-//! - `StreamSender` / `StreamReceiver` / `BidirectionalChannel`: インメモリ（mpsc）
-//! - `QuicBackedChannel`: 実際のQUICストリーム上で動作する型安全チャネル
+//! `UnisonChannel` — 統合チャネル型（request/response + event push）
 
-use serde::{Serialize, de::DeserializeOwned};
-use std::marker::PhantomData;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
-use super::NetworkError;
+use super::{NetworkError, ProtocolMessage, MessageType};
 use super::quic::UnisonStream;
 
-/// 送信側ハンドル
-pub struct StreamSender<T> {
-    tx: mpsc::Sender<T>,
-}
-
-impl<T> StreamSender<T> {
-    pub fn new(tx: mpsc::Sender<T>) -> Self {
-        Self { tx }
-    }
-
-    pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
-        self.tx.send(msg).await
-    }
-
-    /// チャネルが閉じているか
-    pub fn is_closed(&self) -> bool {
-        self.tx.is_closed()
-    }
-}
-
-/// 受信側ハンドル
-pub struct StreamReceiver<T> {
-    rx: mpsc::Receiver<T>,
-}
-
-impl<T> StreamReceiver<T> {
-    pub fn new(rx: mpsc::Receiver<T>) -> Self {
-        Self { rx }
-    }
-
-    pub async fn recv(&mut self) -> Option<T> {
-        self.rx.recv().await
-    }
-}
-
-/// 双方向チャネル
-pub struct BidirectionalChannel<S, R> {
-    pub sender: StreamSender<S>,
-    pub receiver: StreamReceiver<R>,
-}
-
-/// 受信専用チャネル（Push/Event用）
-pub struct ReceiveChannel<T> {
-    pub receiver: StreamReceiver<T>,
-}
-
-/// リクエスト-レスポンスチャネル（transient RPC用）
-pub struct RequestChannel<Req, Res> {
-    _req: std::marker::PhantomData<Req>,
-    _res: std::marker::PhantomData<Res>,
-    pub tx: mpsc::Sender<(Req, tokio::sync::oneshot::Sender<Res>)>,
-}
-
-/// QUICストリーム上で動作する型安全な双方向チャネル
+/// 統合チャネル型 — Request/Response と Event の両パターンをサポート
 ///
-/// 実際のQUICストリームをラップし、Serialize/DeserializeOwned の
-/// 型パラメータで送受信メッセージの型安全性を保証する。
-pub struct QuicBackedChannel<S, R> {
+/// 内部に recv ループを持ち、受信メッセージを振り分ける:
+/// - `Response` → pending の oneshot に送る
+/// - `Event` / その他 → event_rx に流す
+pub struct UnisonChannel {
+    /// QUIC ストリームへの参照（送信用）
     stream: Arc<Mutex<UnisonStream>>,
-    _send: PhantomData<S>,
-    _recv: PhantomData<R>,
+    /// 応答待ちの Request を管理（message_id → oneshot::Sender）
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>,
+    /// Event 受信キュー
+    event_rx: Mutex<mpsc::Receiver<ProtocolMessage>>,
+    /// メッセージ ID カウンター
+    next_id: AtomicU64,
+    /// バックグラウンド受信タスク
+    recv_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<S, R> QuicBackedChannel<S, R>
-where
-    S: Serialize + Send,
-    R: DeserializeOwned + Send,
-{
-    /// UnisonStreamからQuicBackedChannelを作成
+impl UnisonChannel {
+    /// UnisonStream から UnisonChannel を構築し、recv ループを起動する
     pub fn new(stream: UnisonStream) -> Self {
+        let stream = Arc::new(Mutex::new(stream));
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        // recv ループ
+        let recv_stream = Arc::clone(&stream);
+        let recv_pending = Arc::clone(&pending);
+        let recv_task = tokio::spawn(async move {
+            loop {
+                let msg = {
+                    let mut s = recv_stream.lock().await;
+                    match super::SystemStream::receive(&mut *s).await {
+                        Ok(value) => {
+                            // ProtocolMessage として解釈
+                            match serde_json::from_value::<ProtocolMessage>(value) {
+                                Ok(msg) => msg,
+                                Err(_) => continue,
+                            }
+                        }
+                        Err(_) => {
+                            // 接続断 — 全 pending を Error で解決
+                            let mut map = recv_pending.lock().await;
+                            for (_, sender) in map.drain() {
+                                if let Ok(err_msg) = ProtocolMessage::new_with_json(
+                                    0,
+                                    "error".to_string(),
+                                    MessageType::Error,
+                                    serde_json::json!({"error": "connection closed"}),
+                                ) {
+                                    let _ = sender.send(err_msg);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                };
+
+                match msg.msg_type {
+                    MessageType::Response => {
+                        // pending マップから oneshot を取得して解決
+                        let mut map = recv_pending.lock().await;
+                        if let Some(sender) = map.remove(&msg.id) {
+                            let _ = sender.send(msg);
+                        }
+                    }
+                    MessageType::Error => {
+                        // response_to が設定されていれば pending を解決
+                        // そうでなければ event として流す
+                        let mut map = recv_pending.lock().await;
+                        // Error メッセージの id で pending を探す
+                        if let Some(sender) = map.remove(&msg.id) {
+                            let _ = sender.send(msg);
+                        } else {
+                            drop(map);
+                            let _ = event_tx.send(msg).await;
+                        }
+                    }
+                    _ => {
+                        // Event, Request, その他 → event_rx に流す
+                        let _ = event_tx.send(msg).await;
+                    }
+                }
+            }
+        });
+
         Self {
-            stream: Arc::new(Mutex::new(stream)),
-            _send: PhantomData,
-            _recv: PhantomData,
+            stream,
+            pending,
+            event_rx: Mutex::new(event_rx),
+            next_id: AtomicU64::new(1),
+            recv_task: Mutex::new(Some(recv_task)),
         }
     }
 
-    /// 型安全なメッセージ送信
-    pub async fn send(&self, msg: S) -> Result<(), NetworkError> {
-        let value = serde_json::to_value(msg)?;
+    /// Request/Response パターン
+    ///
+    /// メッセージ ID を自動生成し、pending マップに登録。
+    /// Response が返るまで await する。
+    pub async fn request(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, NetworkError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+
+        // pending に登録
+        {
+            let mut map = self.pending.lock().await;
+            map.insert(id, tx);
+        }
+
+        // Request メッセージを送信
+        let msg = ProtocolMessage::new_with_json(
+            id,
+            method.to_string(),
+            MessageType::Request,
+            payload,
+        )?;
+        {
+            let mut stream = self.stream.lock().await;
+            let value = serde_json::to_value(&msg).map_err(|e| {
+                NetworkError::Protocol(format!("Failed to serialize message: {}", e))
+            })?;
+            super::SystemStream::send(&mut *stream, value).await?;
+        }
+
+        // Response を待つ
+        let response = rx.await.map_err(|_| {
+            NetworkError::Protocol("Request cancelled: channel closed".to_string())
+        })?;
+
+        match response.msg_type {
+            MessageType::Error => {
+                let payload = response.payload_as_value()?;
+                Err(NetworkError::Protocol(format!(
+                    "Request error: {}",
+                    payload
+                )))
+            }
+            _ => response.payload_as_value(),
+        }
+    }
+
+    /// 一方向 Event 送信（応答不要）
+    pub async fn send_event(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<(), NetworkError> {
+        let msg = ProtocolMessage::new_with_json(
+            0,
+            method.to_string(),
+            MessageType::Event,
+            payload,
+        )?;
         let mut stream = self.stream.lock().await;
+        let value = serde_json::to_value(&msg).map_err(|e| {
+            NetworkError::Protocol(format!("Failed to serialize message: {}", e))
+        })?;
         super::SystemStream::send(&mut *stream, value).await
     }
 
-    /// 型安全なメッセージ受信
-    pub async fn recv(&self) -> Result<R, NetworkError> {
+    /// Request に対する Response 送信（サーバー側パターン）
+    ///
+    /// `recv()` で受け取った Request の `id` を指定して
+    /// Response メッセージを返す。
+    pub async fn send_response(
+        &self,
+        request_id: u64,
+        method: &str,
+        payload: Value,
+    ) -> Result<(), NetworkError> {
+        let msg = ProtocolMessage::new_with_json(
+            request_id,
+            method.to_string(),
+            MessageType::Response,
+            payload,
+        )?;
         let mut stream = self.stream.lock().await;
-        let value = super::SystemStream::receive(&mut *stream).await?;
-        serde_json::from_value(value).map_err(|e| {
-            NetworkError::Protocol(format!("Failed to deserialize channel message: {}", e))
+        let value = serde_json::to_value(&msg).map_err(|e| {
+            NetworkError::Protocol(format!("Failed to serialize message: {}", e))
+        })?;
+        super::SystemStream::send(&mut *stream, value).await
+    }
+
+    /// Event 受信（サーバーからのプッシュ、または非 Response メッセージ）
+    pub async fn recv(&self) -> Result<ProtocolMessage, NetworkError> {
+        let mut rx = self.event_rx.lock().await;
+        rx.recv().await.ok_or_else(|| {
+            NetworkError::Protocol("Channel closed".to_string())
         })
     }
 
     /// チャネルを閉じる
     pub async fn close(&self) -> Result<(), NetworkError> {
+        // recv タスクを中止
+        if let Some(task) = self.recv_task.lock().await.take() {
+            task.abort();
+        }
+        // ストリームを閉じる
         let mut stream = self.stream.lock().await;
         super::SystemStream::close(&mut *stream).await
-    }
-
-    /// チャネルがアクティブか確認
-    pub fn is_active(&self) -> bool {
-        // stream.lock() は async なので、ここでは Arc のstrong count で判定
-        // 実際のアクティブ状態は send/recv 時にチェックされる
-        Arc::strong_count(&self.stream) > 0
     }
 }

@@ -12,8 +12,8 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
-    info!("🎵 Unison Protocol Ping Client Starting");
-    info!("🔌 Connecting to 127.0.0.1:8080 via QUIC...");
+    info!("Unison Protocol Ping Client Starting");
+    info!("Connecting to 127.0.0.1:8080 via QUIC...");
 
     // Create Unison protocol instance
     let mut protocol = UnisonProtocol::new();
@@ -26,51 +26,56 @@ async fn main() -> Result<()> {
 
     // Connect to server (QUIC uses IP:Port format)
     client.connect("127.0.0.1:8080").await?;
-    info!("✅ Connected to Unison Protocol server!");
+    info!("Connected to Unison Protocol server!");
 
-    // Run Unison protocol tests
-    run_unison_tests(&mut client).await?;
+    // Open the "ping" channel
+    let channel = client.open_channel("ping").await?;
 
-    // Disconnect
-    info!("🔌 Disconnecting...");
+    // Run tests via channel
+    run_channel_tests(&channel).await?;
+
+    // Close channel and disconnect
+    channel.close().await?;
+    info!("Disconnecting...");
     client.disconnect().await?;
-    info!("👋 Disconnected from Unison Protocol server!");
+    info!("Disconnected from Unison Protocol server!");
 
     Ok(())
 }
 
-async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
+async fn run_channel_tests(
+    channel: &unison::network::channel::UnisonChannel,
+) -> Result<()> {
     info!("");
-    info!("🧪 Starting Unison Protocol Tests");
+    info!("Starting Unison Protocol Tests");
     info!("===================================");
 
     // Test 1: Get server time
     info!("");
     info!("Test 1: Get Server Time");
     info!("------------------------");
-    let response = client.call("get_server_time", json!({})).await?;
+    let response = channel.request("get_server_time", json!({})).await?;
 
     if let (Some(server_time), Some(uptime)) = (
         response.get("server_time").and_then(|v| v.as_str()),
         response.get("uptime_seconds").and_then(|v| v.as_u64()),
     ) {
-        info!("⏰ Server time: {} (uptime: {}s)", server_time, uptime);
+        info!("Server time: {} (uptime: {}s)", server_time, uptime);
     }
 
-    // Test 2: Basic ping-pong with Unison Protocol
+    // Test 2: Basic ping-pong
     info!("");
     info!("Test 2: Unison Protocol Ping-Pong (5 rounds)");
     info!("----------------------------------------------");
     for i in 1..=5 {
         let start_time = Instant::now();
 
-        let response = client
-            .call(
+        let response = channel
+            .request(
                 "ping",
                 json!({
                     "message": format!("Hello from Unison client #{}", i),
                     "sequence": i,
-                    "expect_delay": if i == 3 { Some(100) } else { None }
                 }),
             )
             .await?;
@@ -82,7 +87,7 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
             response.get("server_info").and_then(|v| v.as_str()),
         ) {
             info!(
-                "🎵 Round {}: \"{}\" from {} (latency: {:?})",
+                "Round {}: \"{}\" from {} (latency: {:?})",
                 i, message, server_info, latency
             );
         }
@@ -96,18 +101,14 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
     info!("----------------------------------");
 
     let test_cases = [
-        (
-            "uppercase",
-            "Hello Unison Protocol!",
-            "Transform to uppercase",
-        ),
+        ("uppercase", "Hello Unison Protocol!", "Transform to uppercase"),
         ("reverse", "protocol", "Reverse the string"),
         ("", "No transformation", "Echo as-is"),
     ];
 
     for (transform, data, description) in test_cases {
-        let response = client
-            .call(
+        let response = channel
+            .request(
                 "echo",
                 json!({
                     "data": data,
@@ -117,7 +118,7 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
             .await?;
 
         if let Some(echoed_data) = response.get("echoed_data") {
-            info!("🔄 {}: \"{}\" -> \"{}\"", description, data, echoed_data);
+            info!("{}: \"{}\" -> \"{}\"", description, data, echoed_data);
         }
     }
 
@@ -139,8 +140,8 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
         }
     });
 
-    let response = client
-        .call(
+    let response = channel
+        .request(
             "echo",
             json!({
                 "data": complex_data,
@@ -149,16 +150,8 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
         )
         .await?;
 
-    if let Some(echoed_data) = response.get("echoed_data") {
-        info!("📝 Complex JSON echoed successfully:");
-        info!(
-            "   Original keys: {:?}",
-            complex_data.as_object().unwrap().keys().collect::<Vec<_>>()
-        );
-        info!(
-            "   Echoed keys: {:?}",
-            echoed_data.as_object().unwrap().keys().collect::<Vec<_>>()
-        );
+    if response.get("echoed_data").is_some() {
+        info!("Complex JSON echoed successfully");
     }
 
     // Test 5: Performance test
@@ -171,8 +164,8 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
     for i in 1..=20 {
         let ping_start = Instant::now();
 
-        let _response = client
-            .call(
+        let _response = channel
+            .request(
                 "ping",
                 json!({
                     "message": format!("Perf test #{}", i),
@@ -181,11 +174,10 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
             )
             .await?;
 
-        let ping_latency = ping_start.elapsed();
-        total_latency += ping_latency;
+        total_latency += ping_start.elapsed();
 
         if i % 5 == 0 {
-            info!("⚡ Progress: {}/20 pings completed", i);
+            info!("Progress: {}/20 pings completed", i);
         }
     }
 
@@ -193,11 +185,11 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
     let avg_latency = total_latency / 20;
 
     info!("");
-    info!("📊 Performance Test Results:");
-    info!("   • Total time: {:?}", total_perf_time);
-    info!("   • Average latency: {:?}", avg_latency);
+    info!("Performance Test Results:");
+    info!("  Total time: {:?}", total_perf_time);
+    info!("  Average latency: {:?}", avg_latency);
     info!(
-        "   • Throughput: {:.1} pings/sec",
+        "  Throughput: {:.1} pings/sec",
         20.0 / total_perf_time.as_secs_f64()
     );
 
@@ -205,16 +197,16 @@ async fn run_unison_tests(client: &mut ProtocolClient) -> Result<()> {
     info!("");
     info!("Test 6: Final Server Status");
     info!("----------------------------");
-    let final_response = client.call("get_server_time", json!({})).await?;
+    let final_response = channel.request("get_server_time", json!({})).await?;
     if let Some(uptime) = final_response
         .get("uptime_seconds")
         .and_then(|v| v.as_u64())
     {
-        info!("✅ Final server uptime: {}s", uptime);
+        info!("Final server uptime: {}s", uptime);
     }
 
     info!("");
-    info!("🎉 All Unison Protocol tests completed successfully!");
+    info!("All Unison Protocol tests completed successfully!");
     info!("====================================================");
 
     Ok(())
