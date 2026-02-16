@@ -5,6 +5,41 @@
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に基づいており、
 このプロジェクトは [セマンティックバージョニング](https://semver.org/lang/ja/) に準拠しています。
 
+## [0.2.0] - 2026-02-16
+
+### 追加
+- `UnisonChannel`: 統合チャネル型（request/response + event push）
+  - `request()`: Request/Response パターン（メッセージID自動生成、pending管理）
+  - `send_response()`: サーバー側 Response 送信
+  - `send_event()`: 一方向 Event 送信
+  - `recv()`: メッセージ受信（Request/Event）
+  - 内部 recv ループによる自動振り分け（Response → pending oneshot、その他 → event queue）
+- KDL スキーマに `request` / `returns` / `event` 構文を追加
+  - `ChannelRequest` / `ChannelEvent` パーサー構造体
+- `CLAUDE.md`: プロジェクト開発方針ドキュメント
+- Identity Channel: `ServerIdentity` によるリアルタイム自己紹介
+- `ConnectionContext`: 接続状態管理（チャネルハンドル、Identity）
+
+### 変更
+- **Unified Channel アーキテクチャ**: RPC を全廃し、全通信をチャネルに統一
+- `MessageType`: 10 variants → 4 に簡素化（`Request`, `Response`, `Event`, `Error`）
+- `ProtocolServer`: `register_handler()` → `register_channel()` に移行
+- `ProtocolClient`: `call()` 削除、`open_channel()` → `UnisonChannel` を返す
+- KDL スキーマ: `service`/`method` → `channel`/`request`/`event` 構文に移行
+- Rust コード生成: `UnisonChannel` ベースに更新
+- TypeScript コード生成: `call()` → `request()` に統一
+- Examples / Tests / Benchmarks を全て channel ベースに書き換え
+- 仕様ドキュメント（spec/01〜03）を Unified Channel に全面書き換え
+- 設計ドキュメント（design/）を UnisonChannel アーキテクチャに更新
+
+### 削除
+- `register_handler()` / `call()` / `open_typed_channel()` — 旧 RPC メソッド
+- `QuicBackedChannel<S, R>` / `StreamSender` / `StreamReceiver` / `BidirectionalChannel` — 未使用型
+- `ProtocolClientTrait` / `ProtocolServerTrait` / `UnisonServerExt` / `UnisonClientExt` — 旧トレイト
+- `MessageType` の 7 deprecated variants（Stream系）
+- `process_message()` / `handle_call()` — 旧 RPC サーバー処理
+- `send_response()` (quic.rs 内の dead code)
+
 ## [0.1.0-alpha3] - 2025-10-21
 
 ### 追加

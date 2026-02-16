@@ -14,7 +14,7 @@ rust-version.workspace = true
 
 [dependencies]
 # Core Unison
-unison = { path = "../unison-protocol", version = "0.1.0-alpha3" }
+unison = { path = "../unison-protocol", version = "0.2.0" }
 
 # Async runtime
 tokio.workspace = true
