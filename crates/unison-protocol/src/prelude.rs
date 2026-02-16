@@ -11,7 +11,8 @@
 
 // パーサー関連
 pub use crate::parser::{
-    Channel, ChannelFrom, ChannelLifetime, ChannelMessage, ParsedSchema, SchemaParser,
+    Channel, ChannelEvent, ChannelFrom, ChannelLifetime, ChannelMessage, ChannelRequest,
+    ParsedSchema, SchemaParser,
 };
 
 // コードジェネレータ関連
@@ -19,7 +20,7 @@ pub use crate::codegen::{CodeGenerator, RustGenerator, TypeScriptGenerator};
 
 // ネットワーク関連
 pub use crate::network::{
-    ProtocolClient, ProtocolServer, UnisonClient, UnisonServer, UnisonServerExt,
+    ProtocolClient, ProtocolServer, UnisonChannel, UnisonClient, UnisonServer,
 };
 
 // エラー型

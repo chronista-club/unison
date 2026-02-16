@@ -1,6 +1,6 @@
 //! E2Eテスト: creo_syncスキーマから生成されるConnectionBuilder の検証
 //!
-//! チャネル型の生成（QuicBackedChannel, ConnectionBuilder）を検証。
+//! チャネル型の生成（UnisonChannel, ConnectionBuilder）を検証。
 
 use unison::codegen::CodeGenerator;
 use unison::parser::TypeRegistry;
@@ -53,10 +53,10 @@ fn test_e2e_connection_builder_generation() {
         );
     }
 
-    // QuicBackedChannel型が使われること
+    // UnisonChannel型が使われること（Unified Channel統合後）
     assert!(
-        code.contains("QuicBackedChannel"),
-        "Expected QuicBackedChannel type in generated code"
+        code.contains("UnisonChannel"),
+        "Expected UnisonChannel type in generated code"
     );
 }
 
@@ -99,29 +99,10 @@ fn test_e2e_channel_type_mapping() {
     let generator = RustGenerator::new();
     let code = generator.generate(&parsed, &type_registry).unwrap();
 
-    // インメモリConnection: 各チャネル型が正しいこと
-    // control: persistent + send+recv → BidirectionalChannel
+    // Unified Channel: 全チャネルが UnisonChannel 型に統一
     assert!(
-        code.contains("BidirectionalChannel"),
-        "Expected BidirectionalChannel for control channel"
-    );
-
-    // events: server push → ReceiveChannel
-    assert!(
-        code.contains("ReceiveChannel"),
-        "Expected ReceiveChannel for events channel"
-    );
-
-    // query: transient + send+recv → RequestChannel
-    assert!(
-        code.contains("RequestChannel"),
-        "Expected RequestChannel for query channel"
-    );
-
-    // QuicConnection: 全チャネルがQuicBackedChannel
-    assert!(
-        code.contains("QuicBackedChannel"),
-        "Expected QuicBackedChannel in QuicConnection"
+        code.contains("UnisonChannel"),
+        "Expected UnisonChannel for all channels"
     );
 
     // ConnectionBuilderトレイトとimpl
@@ -132,7 +113,7 @@ fn test_e2e_channel_type_mapping() {
 }
 
 #[test]
-fn test_quic_backed_channel_imports() {
+fn test_unison_channel_imports() {
     let schema = r#"
         protocol "minimal" version="1.0.0" {
             namespace "test"
@@ -154,9 +135,9 @@ fn test_quic_backed_channel_imports() {
     let generator = RustGenerator::new();
     let code = generator.generate(&parsed, &type_registry).unwrap();
 
-    // QuicBackedChannel importが含まれること
+    // UnisonChannel importが含まれること
     assert!(
-        code.contains("QuicBackedChannel"),
-        "Expected QuicBackedChannel in imports"
+        code.contains("UnisonChannel"),
+        "Expected UnisonChannel in imports"
     );
 }

@@ -75,7 +75,7 @@ impl ServerIdentity {
         ProtocolMessage {
             id: 0,
             method: "__identity".to_string(),
-            msg_type: MessageType::StreamSend,
+            msg_type: MessageType::Event,
             payload: serde_json::to_string(self).unwrap(),
         }
     }

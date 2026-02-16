@@ -1,28 +1,26 @@
-protocol "ping-pong" version="1.0.0" {
+protocol "ping-pong" version="2.0.0" {
     namespace "test.ping_pong"
 
-    service "PingPong" {
-        method "ping" {
-            request {
-                field "message" type="string" required=#true
-            }
-            response {
+    channel "ping-pong" from="client" lifetime="persistent" {
+        request "Ping" {
+            field "message" type="string" required=#true
+
+            returns "Pong" {
                 field "reply" type="string" required=#true
                 field "timestamp" type="string"
             }
         }
 
-        method "echo" {
-            request {
-                field "data" type="json" required=#true
-            }
-            response {
+        request "Echo" {
+            field "data" type="json" required=#true
+
+            returns "EchoResult" {
                 field "data" type="json" required=#true
             }
         }
 
-        method "health" {
-            response {
+        request "Health" {
+            returns "HealthStatus" {
                 field "status" type="string" required=#true
                 field "uptime_ms" type="int"
             }

@@ -48,22 +48,21 @@ tracing = "0.1"
 protocol "my-service" version="1.0.0" {
     namespace "com.example.myservice"
 
-    service "UserService" {
-        method "createUser" {
-            request {
-                field "name" type="string" required=true
-                field "email" type="string" required=true
-            }
-            response {
-                field "id" type="string" required=true
-                field "created_at" type="timestamp" required=true
+    // チャネルベースの Request/Response + Event 定義
+    channel "users" from="client" lifetime="persistent" {
+        request "CreateUser" {
+            field "name" type="string" required=#true
+            field "email" type="string" required=#true
+
+            returns "UserCreated" {
+                field "id" type="string" required=#true
+                field "created_at" type="timestamp" required=#true
             }
         }
     }
 
-    // Stream Channel 定義
     channel "events" from="server" lifetime="persistent" {
-        send "UserEvent" {
+        event "UserEvent" {
             field "event_type" type="string" required=#true
             field "user_id" type="string" required=#true
             field "timestamp" type="string"
@@ -76,33 +75,33 @@ protocol "my-service" version="1.0.0" {
 
 ```rust
 use unison::{ProtocolServer, NetworkError};
-use unison::network::channel::QuicBackedChannel;
-use serde_json::json;
+use unison::network::UnisonChannel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Identity 情報付きでサーバーを作成
     let server = ProtocolServer::with_identity(
         "my-server", "1.0.0", "com.example.myservice",
     );
 
-    // RPC ハンドラーの登録
-    server.register_handler("createUser", |payload| {
-        let name = payload["name"].as_str().unwrap();
-        Ok(json!({
-            "id": uuid::Uuid::new_v4().to_string(),
-            "created_at": chrono::Utc::now().to_rfc3339()
-        }))
-    });
-
     // チャネルハンドラーの登録
-    server.register_channel("events", |ctx, stream| async move {
-        let channel = QuicBackedChannel::<UserEvent, ()>::new(stream);
-        // イベント配信ロジック
+    server.register_channel("users", |ctx, stream| async move {
+        let mut channel = UnisonChannel::new(stream);
+        loop {
+            match channel.recv().await {
+                Ok(msg) => { /* request を処理 */ }
+                Err(_) => break,
+            }
+        }
         Ok(())
     }).await;
 
-    // QUIC サーバーの起動（IPv6）
+    server.register_channel("events", |ctx, stream| async move {
+        let channel = UnisonChannel::new(stream);
+        // イベント配信ロジック
+        channel.send_event("UserEvent", json!({"event_type": "created", "user_id": "123"})).await?;
+        Ok(())
+    }).await;
+
     server.listen("[::1]:8080").await?;
     Ok(())
 }
@@ -112,31 +111,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use unison::ProtocolClient;
-use unison::network::channel::QuicBackedChannel;
+use unison::network::UnisonChannel;
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ProtocolClient::new_default()?;
-
-    // サーバーへの接続（Identity Handshake が自動実行）
     client.connect("[::1]:8080").await?;
 
-    // RPC 呼び出し
-    let response = client.call("createUser", json!({
+    // チャネル経由の Request/Response
+    let users = client.open_channel("users").await?;
+    let response = users.request("CreateUser", json!({
         "name": "Alice",
         "email": "alice@example.com"
     })).await?;
     println!("作成されたユーザー: {}", response);
 
-    // チャネル通信: サーバーからのイベントを受信
-    let events: QuicBackedChannel<(), UserEvent> =
-        client.open_channel("events").await?;
-
+    // チャネル経由のイベント受信
+    let mut events = client.open_channel("events").await?;
     loop {
         match events.recv().await {
             Ok(event) => println!("イベント: {:?}", event),
-            Err(e) => break,
+            Err(_) => break,
         }
     }
 
@@ -158,9 +154,9 @@ unison/
 |
 |-- ネットワーク層
 |   |-- quic/            # QUIC トランスポート実装
-|   |-- client/          # ProtocolClient (open_channel, RPC)
-|   |-- server/          # ProtocolServer (register_channel, ハンドラー)
-|   |-- channel/         # Stream Channel 型 (QuicBackedChannel 等)
+|   |-- client/          # ProtocolClient (open_channel → UnisonChannel)
+|   |-- server/          # ProtocolServer (register_channel)
+|   |-- channel/         # UnisonChannel (統合チャネル型)
 |   |-- identity/        # Identity Handshake (ServerIdentity, ChannelInfo)
 |   |-- context/         # ConnectionContext (接続状態管理)
 |   +-- service/         # サービス抽象化層
@@ -184,22 +180,22 @@ pub trait SystemStream: Send + Sync {
 }
 ```
 
-#### QuicBackedChannel<S, R> -- 型安全チャネル
+#### UnisonChannel -- 統合チャネル型
 
-QUIC ストリーム上で動作する型安全な双方向チャネル。`Serialize` / `DeserializeOwned` のトレイト境界で送受信メッセージの型を保証する。
+QUIC ストリーム上で動作する統合チャネル。Request/Response パターンと Event push の両方をサポートする。内部に recv ループを持ち、受信メッセージを自動的に振り分ける。
 
 ```rust
-pub struct QuicBackedChannel<S, R> {
+pub struct UnisonChannel {
     stream: Arc<Mutex<UnisonStream>>,
-    _send: PhantomData<S>,
-    _recv: PhantomData<R>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>,
+    event_rx: mpsc::Receiver<ProtocolMessage>,
 }
 
-impl<S: Serialize + Send, R: DeserializeOwned + Send> QuicBackedChannel<S, R> {
-    pub fn new(stream: UnisonStream) -> Self;
-    pub async fn send(&self, msg: S) -> Result<(), NetworkError>;
-    pub async fn recv(&self) -> Result<R, NetworkError>;
-    pub async fn close(&self) -> Result<(), NetworkError>;
+impl UnisonChannel {
+    pub async fn request(&self, method: &str, payload: Value) -> Result<Value, NetworkError>;
+    pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError>;
+    pub async fn recv(&mut self) -> Result<ProtocolMessage, NetworkError>;
+    pub async fn close(&mut self) -> Result<(), NetworkError>;
 }
 ```
 
@@ -317,38 +313,31 @@ let received_packet = UnisonPacket::<MyPayload>::from_bytes(received_bytes)?;
 let received_payload = received_packet.extract_payload()?;
 ```
 
-### カスタムハンドラー実装
+### チャネルベースの双方向通信
 
 ```rust
-use unison::context::{Handler, HandlerRegistry};
+use unison::ProtocolClient;
+use unison::network::UnisonChannel;
+use serde_json::json;
 
-struct MyCustomHandler;
+let mut client = ProtocolClient::new_default()?;
+client.connect("[::1]:8080").await?;
 
-#[async_trait]
-impl Handler for MyCustomHandler {
-    async fn handle(&self, input: Value) -> Result<Value, NetworkError> {
-        Ok(json!({"status": "processed"}))
-    }
-}
+// チャネルを開く
+let mut channel = client.open_channel("messaging").await?;
 
-let registry = HandlerRegistry::new();
-registry.register("custom", MyCustomHandler).await;
-```
+// Request/Response パターン
+let response = channel.request("send_message", json!({
+    "to": "user_123",
+    "body": "Hello!"
+})).await?;
 
-### ストリーミング通信
-
-```rust
-use unison::network::UnisonStream;
-
-// ストリームの作成
-let mut stream = client.start_system_stream("data_feed", json!({})).await?;
-
-// 非同期送受信
+// イベント受信（非同期ループ）
 tokio::spawn(async move {
-    while stream.is_active() {
-        match stream.receive().await {
-            Ok(data) => println!("受信: {}", data),
-            Err(e) => eprintln!("エラー: {}", e),
+    loop {
+        match channel.recv().await {
+            Ok(event) => println!("イベント: {:?}", event),
+            Err(_) => break,
         }
     }
 });
@@ -367,9 +356,9 @@ println!("アクティブストリーム: {}", stats.active_streams);
 
 - [API リファレンス](https://docs.rs/unison)
 - **仕様書** (spec/) -- プロジェクトの正式な要求仕様
-  - [コアネットワーク](spec/01-core-concept/SPEC.md) -- QUIC トランスポート、3 層アーキテクチャ
-  - [RPC プロトコル](spec/02-protocol-rpc/SPEC.md) -- KDL ベース RPC 層、コード生成
-  - [Stream Channel](spec/03-stream-channels/SPEC.md) -- チャネル型、KDL channel 構文、QuicBackedChannel
+  - [コアコンセプト](spec/01-core-concept/SPEC.md) -- Everything is a Channel、3 層アーキテクチャ
+  - [Unified Channel プロトコル](spec/02-protocol-rpc/SPEC.md) -- KDL スキーマ、request/event 構文、コード生成
+  - [Stream Channel](spec/03-stream-channels/SPEC.md) -- UnisonChannel、チャネル型仕様
 - **設計ドキュメント** (design/) -- 実装方法の詳細
   - [アーキテクチャ設計](design/architecture.md)
   - [パケット実装仕様](design/packet.md)

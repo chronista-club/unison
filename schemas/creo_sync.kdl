@@ -1,21 +1,22 @@
-protocol "creo-sync" version="1.0.0" {
+protocol "creo-sync" version="2.0.0" {
     namespace "club.chronista.sync"
 
     // === Control Plane ===
     channel "control" from="client" lifetime="persistent" {
-        send "Subscribe" {
+        request "Subscribe" {
             field "category" type="string"
             field "tags" type="string"
-        }
-        recv "Ack" {
-            field "status" type="string"
-            field "channel_ref" type="string"
+
+            returns "Ack" {
+                field "status" type="string"
+                field "channel_ref" type="string"
+            }
         }
     }
 
     // === Data Plane ===
     channel "events" from="server" lifetime="persistent" {
-        send "MemoryEvent" {
+        event "MemoryEvent" {
             field "event_type" type="string" required=#true
             field "memory_id" type="string" required=#true
             field "category" type="string"
@@ -24,15 +25,17 @@ protocol "creo-sync" version="1.0.0" {
         }
     }
 
-    channel "query" from="client" lifetime="transient" {
-        send "Query" {
+    channel "query" from="client" lifetime="persistent" {
+        request "Query" {
             field "method" type="string" required=#true
             field "params" type="json"
+
+            returns "Result" {
+                field "data" type="json"
+            }
         }
-        recv "Result" {
-            field "data" type="json"
-        }
-        error "QueryError" {
+
+        event "QueryError" {
             field "code" type="string"
             field "message" type="string"
         }
@@ -40,18 +43,28 @@ protocol "creo-sync" version="1.0.0" {
 
     // === Messaging Plane ===
     channel "messaging" from="either" lifetime="persistent" {
-        send "CCMessage" {
+        request "SendMessage" {
+            field "from" type="string" required=#true
+            field "to" type="string"
+            field "content" type="string" required=#true
+            field "thread" type="string"
+
+            returns "MessageAck" {
+                field "status" type="string"
+            }
+        }
+
+        event "CCMessage" {
             field "from" type="string" required=#true
             field "to" type="string"
             field "content" type="string" required=#true
             field "thread" type="string"
         }
-        recv "CCMessage"
     }
 
     // === Urgent Plane ===
     channel "urgent" from="server" lifetime="transient" {
-        send "Alert" {
+        event "Alert" {
             field "level" type="string" required=#true
             field "title" type="string" required=#true
             field "body" type="string"

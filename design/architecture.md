@@ -93,9 +93,9 @@ crates/unison-protocol/src/
   network/
     mod.rs                 -- NetworkError、ProtocolMessage、MessageType、トレイト群
     quic.rs                -- QuicClient、QuicServer、UnisonStream
-    server.rs              -- ProtocolServer（ハンドラー管理）
-    client.rs              -- ProtocolClient（RPC/ストリーム/チャネル）
-    channel.rs             -- StreamSender/Receiver、QuicBackedChannel
+    server.rs              -- ProtocolServer（チャネルハンドラー管理）
+    client.rs              -- ProtocolClient（チャネル開設・通信）
+    channel.rs             -- UnisonChannel、StreamSender/Receiver
     identity.rs            -- ServerIdentity、ChannelInfo、ChannelUpdate
     context.rs             -- ConnectionContext（接続状態管理）
     service.rs             -- Service trait、UnisonService、RealtimeService
@@ -110,11 +110,11 @@ graph TB
 
         QUIC["quic.rs<br/>-- QuicClient: QUIC接続・送受信<br/>-- QuicServer: 接続受付・ルーティング<br/>-- UnisonStream: 双方向ストリーム実装<br/>-- read_frame / write_frame<br/>-- TLS証明書管理"]
 
-        SERVER["server.rs<br/>-- ProtocolServer: ハンドラーレジストリ<br/>-- CallHandler / StreamHandler 管理<br/>-- ChannelHandler 登録・ルーティング<br/>-- ServerIdentity 構築<br/>-- UnisonService 管理"]
+        SERVER["server.rs<br/>-- ProtocolServer: チャネルハンドラーレジストリ<br/>-- ChannelHandler 登録・ルーティング<br/>-- ServerIdentity 構築<br/>-- UnisonService 管理"]
 
-        CLIENT["client.rs<br/>-- ProtocolClient: RPC呼び出し<br/>-- open_channel(): チャネル開設<br/>-- Identity受信処理<br/>-- ConnectionContext管理"]
+        CLIENT["client.rs<br/>-- ProtocolClient: チャネル通信<br/>-- open_channel(): UnisonChannel開設<br/>-- Identity受信処理<br/>-- ConnectionContext管理"]
 
-        CHANNEL["channel.rs<br/>-- StreamSender / StreamReceiver<br/>-- BidirectionalChannel<br/>-- ReceiveChannel / RequestChannel<br/>-- QuicBackedChannel: 型安全QUIC Channel"]
+        CHANNEL["channel.rs<br/>-- UnisonChannel: 統合チャネル型<br/>(request/response + event push)"]
 
         IDENTITY["identity.rs<br/>-- ServerIdentity: ノード自己紹介<br/>-- ChannelInfo / ChannelDirection<br/>-- ChannelStatus / ChannelUpdate<br/>-- __identity メッセージ変換"]
 
@@ -157,41 +157,36 @@ graph TB
 
 ## 4. データフロー
 
-### 4.1 RPCフロー
+### 4.1 Request/Response フロー（UnisonChannel経由）
 
 ```mermaid
 sequenceDiagram
     participant App as Application
-    participant PC as ProtocolClient
-    participant QC as QuicClient
+    participant UC as UnisonChannel
+    participant US as UnisonStream
     participant Net as QUIC Connection
     participant QS as QuicServer
-    participant PS as ProtocolServer
-    participant H as CallHandler
+    participant CH as ChannelHandler
 
-    App->>PC: call("ping", payload)
-    PC->>PC: ProtocolMessage作成<br/>(id, method, Request, payload)
-    PC->>QC: send(message)
-    QC->>QC: message.into_frame()<br/>ProtocolFrame(RkyvPayload)
-    QC->>Net: open_bi() + write_all(frame_bytes) + finish()
+    App->>UC: request("method", payload)
+    UC->>UC: ProtocolMessage作成<br/>(id, method, Request, payload)
+    UC->>US: send(message)
+    US->>US: message.into_frame()
+    US->>Net: write_frame(frame_bytes)
 
     Net->>QS: accept_bi()
-    QS->>QS: read_to_end() or read_frame()
-    QS->>QS: ProtocolFrame::from_bytes()<br/>ProtocolMessage::from_frame()
-    QS->>PS: handle_call("ping", payload)
-    PS->>H: handler(payload)
-    H-->>PS: Result<Value>
-    PS-->>QS: ProtocolMessage(Response)
-    QS->>QS: response.into_frame()
-    QS-->>Net: write_all(frame_bytes) + finish()
+    QS->>QS: read_frame() -> ProtocolMessage
+    QS->>QS: method.strip_prefix("__channel:")
+    QS->>CH: handler(ctx, UnisonStream)
+    Note over CH: チャネルハンドラー内で<br/>request を処理し response を返す
 
-    Net-->>QC: recv_stream.read_to_end()
-    QC->>QC: ProtocolFrame::from_bytes()
-    QC-->>PC: tx.send(response)
-    PC-->>App: Result<Value>
+    CH-->>Net: write_frame(response)
+    Net-->>US: read_frame()
+    US-->>UC: pending requestのoneshotに送信
+    UC-->>App: Result<Value>
 ```
 
-### 4.2 Channelフロー
+### 4.2 Channelフロー（開設〜通信）
 
 ```mermaid
 sequenceDiagram
@@ -202,14 +197,14 @@ sequenceDiagram
     participant PS as ProtocolServer
     participant CH as ChannelHandler
 
-    App->>PC: open_channel::<S,R>("events")
+    App->>PC: open_channel("events")
 
     PC->>Net: open_bi()
-    PC->>PC: ProtocolMessage作成<br/>(method: "__channel:events",<br/>type: BidirectionalStream)
+    PC->>PC: ProtocolMessage作成<br/>(method: "__channel:events",<br/>type: Request)
     PC->>PC: write_frame(frame_bytes)
     PC->>PC: UnisonStream::from_streams()
-    PC->>PC: QuicBackedChannel::new(stream)
-    PC-->>App: QuicBackedChannel<S,R>
+    PC->>PC: UnisonChannel::new(stream)
+    PC-->>App: UnisonChannel
 
     Net->>QS: accept_bi()
     QS->>QS: read_frame() -> ProtocolMessage
@@ -221,12 +216,12 @@ sequenceDiagram
     Note over CH: ストリームは生存したまま<br/>ChannelHandlerが管理
 
     loop チャネル通信
-        App->>PC: channel.send(data)
-        PC->>Net: SystemStream::send(value)
-        Net->>CH: read_frame() -> data
-        CH-->>Net: write_frame(response)
-        Net-->>PC: SystemStream::receive()
-        PC-->>App: channel.recv() -> R
+        App->>PC: channel.request("method", payload)
+        PC->>Net: write_frame(Request)
+        Net->>CH: read_frame() -> Request
+        CH-->>Net: write_frame(Response)
+        Net-->>PC: recv loop -> pending に振り分け
+        PC-->>App: Result<Value>
     end
 
     App->>PC: channel.close()
@@ -252,7 +247,7 @@ sequenceDiagram
     PS-->>S: ServerIdentity
 
     S->>CTX: set_identity(identity)
-    S->>S: identity.to_protocol_message()<br/>(__identity, StreamSend)
+    S->>S: identity.to_protocol_message()<br/>(__identity, Event)
     S->>Net: open_bi() + write_all(frame) + finish()
 
     Net-->>C: transport.receive()
@@ -310,22 +305,23 @@ pub enum NetworkError {
 
 | Trait | 責務 | 主要メソッド |
 |-------|------|------------|
-| `UnisonClient` | 接続管理・RPC呼び出し | `connect()`, `call()`, `disconnect()`, `is_connected()` |
-| `UnisonClientExt` | SystemStreamの開設と管理 | `start_system_stream()`, `list_system_streams()`, `close_system_stream()` |
-| `ProtocolClientTrait` | ジェネリックRPC・ストリーミング | `call<TReq, TRes>()`, `stream<TReq, TRes>()` |
+| `UnisonClient` | 接続管理 | `connect()`, `disconnect()`, `is_connected()` |
+
+> **Note**: 旧 `ProtocolClientTrait`, `UnisonClientExt` は Unified Channel 統合により削除済み。
 
 #### サーバー側
 
 | Trait | 責務 | 主要メソッド |
 |-------|------|------------|
 | `UnisonServer` | サーバーライフサイクル | `listen()`, `stop()`, `is_running()` |
-| `UnisonServerExt` | ハンドラー登録 | `register_handler()`, `register_stream_handler()`, `register_system_stream_handler()` |
-| `ProtocolServerTrait` | リクエスト・ストリーム処理 | `handle_call()`, `handle_stream()` |
 
-#### ストリーム・サービス
+> **Note**: 旧 `ProtocolServerTrait`, `UnisonServerExt` は Unified Channel 統合により削除済み。ハンドラー登録は `ProtocolServer::register_channel()` メソッドで行う。
 
-| Trait | 責務 | 主要メソッド |
-|-------|------|------------|
+#### チャネル・ストリーム・サービス
+
+| Trait / 型 | 責務 | 主要メソッド |
+|------------|------|------------|
+| `UnisonChannel` | 統合チャネル（request/response + event） | `request()`, `send_event()`, `recv()`, `close()` |
 | `SystemStream` | 双方向ストリームI/O | `send()`, `receive()`, `is_active()`, `close()`, `get_handle()` |
 | `Service` | 高レベルサービスIF | `service_type()`, `service_name()`, `handle_request()`, `shutdown()` |
 | `RealtimeService` | リアルタイム通信拡張 | `send_realtime()`, `receive_with_timeout()`, `get_performance_stats()` |
@@ -338,13 +334,15 @@ graph TB
         APP["アプリケーション"]
     end
 
+    subgraph "チャネル層"
+        UCH["UnisonChannel<br/>(request + event 統合)"]
+    end
+
     subgraph "拡張ポイント"
-        UC["UnisonClient / UnisonClientExt"]
-        US["UnisonServer / UnisonServerExt"]
+        UC["UnisonClient"]
+        US["UnisonServer"]
         SS["SystemStream"]
         SVC["Service / RealtimeService"]
-        PCT["ProtocolClientTrait"]
-        PST["ProtocolServerTrait"]
     end
 
     subgraph "デフォルト実装"
@@ -354,23 +352,21 @@ graph TB
         USVC["UnisonService"]
     end
 
-    APP --> UC
-    APP --> US
+    APP --> UCH
     APP --> SVC
 
+    UCH --> PC
     UC --> PC
     US --> PS
     SS --> USTREAM
     SVC --> USVC
-    PCT --> PC
-    PST --> PS
     SS --> SVC
 ```
 
 カスタム実装の例:
 - `SystemStream` を実装して、QUIC以外のトランスポート上でストリームを動作させる
 - `Service` を実装して、ドメイン固有のサービスロジックを提供する
-- `ProtocolClientTrait` を実装して、カスタムの直列化/逆直列化ロジックを追加する
+- `UnisonChannel` をベースに、チャネルハンドラーでドメイン固有のプロトコルを構築する
 
 ---
 

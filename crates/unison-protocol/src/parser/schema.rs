@@ -91,7 +91,37 @@ pub struct ChannelMessage {
     pub fields: Vec<Field>,
 }
 
-/// Channel定義（Stream-First APIのプリミティブ）
+/// チャネル内 Request/Response 定義
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "request")]
+pub struct ChannelRequest {
+    /// リクエスト名
+    #[kdl(argument)]
+    pub name: String,
+
+    /// リクエストフィールド
+    #[kdl(children, name = "field")]
+    pub fields: Vec<Field>,
+
+    /// レスポンス型（returns ブロック）
+    #[kdl(child)]
+    pub returns: Option<ChannelMessage>,
+}
+
+/// チャネル内 Event 定義
+#[derive(Debug, Clone, KdlDeserialize)]
+#[kdl(name = "event")]
+pub struct ChannelEvent {
+    /// イベント名
+    #[kdl(argument)]
+    pub name: String,
+
+    /// イベントフィールド
+    #[kdl(children, name = "field")]
+    pub fields: Vec<Field>,
+}
+
+/// Channel定義（Unified Channel プリミティブ）
 #[derive(Debug, Clone, KdlDeserialize)]
 #[kdl(name = "channel")]
 pub struct Channel {
@@ -107,15 +137,23 @@ pub struct Channel {
     #[kdl(property)]
     pub lifetime: ChannelLifetime,
 
-    /// 送信メッセージ型（opener視点）
+    /// Request/Response 定義（新構文）
+    #[kdl(children, name = "request")]
+    pub requests: Vec<ChannelRequest>,
+
+    /// Event 定義（新構文）
+    #[kdl(children, name = "event")]
+    pub events: Vec<ChannelEvent>,
+
+    /// 送信メッセージ型（旧構文、後方互換）
     #[kdl(child)]
     pub send: Option<ChannelMessage>,
 
-    /// 受信メッセージ型（opener視点）
+    /// 受信メッセージ型（旧構文、後方互換）
     #[kdl(child)]
     pub recv: Option<ChannelMessage>,
 
-    /// エラー型
+    /// エラー型（旧構文、後方互換）
     #[kdl(child)]
     pub error: Option<ChannelMessage>,
 }

@@ -58,35 +58,46 @@ fn test_creo_sync_channel_types() {
     let parsed = parser.parse(&schema).unwrap();
     let protocol = parsed.protocol.as_ref().unwrap();
 
-    // control: client→server, persistent, send+recv → BidirectionalChannel
+    // control: client→server, persistent, request "Subscribe" → returns "Ack"
     let control = &protocol.channels[0];
     assert_eq!(control.from, ChannelFrom::Client);
     assert_eq!(control.lifetime, ChannelLifetime::Persistent);
-    assert!(control.send.is_some());
-    assert!(control.recv.is_some());
+    assert_eq!(control.requests.len(), 1);
+    assert_eq!(control.requests[0].name, "Subscribe");
+    assert!(control.requests[0].returns.is_some());
+    assert_eq!(control.requests[0].returns.as_ref().unwrap().name, "Ack");
 
-    // events: server→client, persistent, send only → ReceiveChannel
+    // events: server→client, persistent, event "MemoryEvent"
     let events = &protocol.channels[1];
     assert_eq!(events.from, ChannelFrom::Server);
     assert_eq!(events.lifetime, ChannelLifetime::Persistent);
-    assert!(events.send.is_some());
-    assert!(events.recv.is_none());
+    assert_eq!(events.events.len(), 1);
+    assert_eq!(events.events[0].name, "MemoryEvent");
+    assert!(events.requests.is_empty());
 
-    // query: client→server, transient, send+recv+error → RequestChannel
+    // query: client→server, persistent, request "Query" + event "QueryError"
     let query = &protocol.channels[2];
     assert_eq!(query.from, ChannelFrom::Client);
-    assert_eq!(query.lifetime, ChannelLifetime::Transient);
-    assert!(query.send.is_some());
-    assert!(query.recv.is_some());
-    assert!(query.error.is_some());
+    assert_eq!(query.lifetime, ChannelLifetime::Persistent);
+    assert_eq!(query.requests.len(), 1);
+    assert_eq!(query.requests[0].name, "Query");
+    assert!(query.requests[0].returns.is_some());
+    assert_eq!(query.events.len(), 1);
+    assert_eq!(query.events[0].name, "QueryError");
 
-    // messaging: either, persistent, send+recv → BidirectionalChannel
+    // messaging: either, persistent, request + event
     let messaging = &protocol.channels[3];
     assert_eq!(messaging.from, ChannelFrom::Either);
     assert_eq!(messaging.lifetime, ChannelLifetime::Persistent);
+    assert_eq!(messaging.requests.len(), 1);
+    assert_eq!(messaging.events.len(), 1);
+    assert_eq!(messaging.events[0].name, "CCMessage");
 
-    // urgent: server→client, transient, send only → ReceiveChannel
+    // urgent: server→client, transient, event "Alert"
     let urgent = &protocol.channels[4];
     assert_eq!(urgent.from, ChannelFrom::Server);
     assert_eq!(urgent.lifetime, ChannelLifetime::Transient);
+    assert_eq!(urgent.events.len(), 1);
+    assert_eq!(urgent.events[0].name, "Alert");
+    assert!(urgent.requests.is_empty());
 }

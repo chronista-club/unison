@@ -318,7 +318,7 @@ export type LanguageCode = string; // ISO 639-1 format
 
         format!(
             r#"  async {}(request: {}): Promise<{}> {{
-    return this.transport.call('{}', request);
+    return this.transport.request('{}', request);
   }}
 "#,
             name, request_type, response_type, method.name
@@ -359,7 +359,7 @@ impl TypeScriptGenerator {
     pub fn generate_transport_interface() -> String {
         r#"// WebSocket Transport Interface
 export interface WebSocketTransport {
-  call<TRequest, TResponse>(method: string, request: TRequest): Promise<TResponse>;
+  request<TRequest, TResponse>(method: string, request: TRequest): Promise<TResponse>;
   stream<TRequest, TResponse>(method: string, request: TRequest): AsyncIterableIterator<TResponse>;
   connect(url: string): Promise<void>;
   disconnect(): Promise<void>;
@@ -398,7 +398,7 @@ export class WebSocketTransportImpl implements WebSocketTransport {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  async call<TRequest, TResponse>(method: string, request: TRequest): Promise<TResponse> {
+  async request<TRequest, TResponse>(method: string, request: TRequest): Promise<TResponse> {
     if (!this.isConnected()) {
       throw new Error('WebSocket not connected');
     }

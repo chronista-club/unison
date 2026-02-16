@@ -57,12 +57,9 @@ fn test_channel_codegen() {
         code.contains("query"),
         "Expected 'query' field in Connection"
     );
+    // Unified Channel: 全チャネルが UnisonChannel 型に統一
     assert!(
-        code.contains("ReceiveChannel"),
-        "Expected ReceiveChannel type for server push"
-    );
-    assert!(
-        code.contains("RequestChannel") || code.contains("BidirectionalChannel"),
-        "Expected RequestChannel or BidirectionalChannel for query"
+        code.contains("UnisonChannel"),
+        "Expected UnisonChannel type for all channels"
     );
 }

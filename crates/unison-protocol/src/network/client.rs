@@ -1,21 +1,14 @@
-use anyhow::{Context, Result};
-use futures_util::Stream;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use anyhow::Result;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::channel::QuicBackedChannel;
+use super::channel::UnisonChannel;
 use super::context::ConnectionContext;
 use super::identity::ServerIdentity;
 use super::quic::{QuicClient, UnisonStream, write_frame};
 use super::service::Service;
-use super::{
-    MessageType, NetworkError, ProtocolClientTrait, ProtocolMessage, UnisonClient, UnisonClientExt,
-};
-
-// TransportWrapper removed - using QuicClient directly
+use super::{MessageType, NetworkError, ProtocolMessage, UnisonClient};
 
 /// QUIC protocol client implementation
 pub struct ProtocolClient {
@@ -24,8 +17,6 @@ pub struct ProtocolClient {
     /// 接続コンテキスト（Identity情報・チャネル状態）
     context: Arc<ConnectionContext>,
 }
-
-// Transport trait removed - using direct implementation on TransportWrapper
 
 impl ProtocolClient {
     pub fn new(transport: QuicClient) -> Self {
@@ -56,18 +47,14 @@ impl ProtocolClient {
         self.context.identity().await
     }
 
-    /// チャネルを開く（QUICストリーム上の型安全チャネル）
+    /// チャネルを開く（UnisonChannel を返す）
     ///
     /// `__channel:{name}` メソッドで新しいQUICストリームを開き、
-    /// `QuicBackedChannel` でラップして返す。
-    pub async fn open_channel<S, R>(
+    /// `UnisonChannel` でラップして返す。
+    pub async fn open_channel(
         &self,
         channel_name: &str,
-    ) -> Result<QuicBackedChannel<S, R>, NetworkError>
-    where
-        S: Serialize + Send,
-        R: DeserializeOwned + Send,
-    {
+    ) -> Result<UnisonChannel, NetworkError> {
         let connection_guard = self.transport.connection().read().await;
         let connection = connection_guard
             .as_ref()
@@ -85,7 +72,7 @@ impl ProtocolClient {
         let message = ProtocolMessage::new_with_json(
             request_id,
             method,
-            MessageType::BidirectionalStream,
+            MessageType::Request,
             serde_json::json!({}),
         )?;
 
@@ -97,7 +84,7 @@ impl ProtocolClient {
             .await
             .map_err(|e| NetworkError::Protocol(format!("Failed to send channel open: {}", e)))?;
 
-        // UnisonStreamを作成してQuicBackedChannelでラップ
+        // UnisonStreamを作成してUnisonChannelでラップ
         let conn_arc = Arc::new(connection.clone());
         let stream = UnisonStream::from_streams(
             request_id,
@@ -116,12 +103,11 @@ impl ProtocolClient {
             })
             .await;
 
-        Ok(QuicBackedChannel::new(stream))
+        Ok(UnisonChannel::new(stream))
     }
 
     /// 接続後にサーバーからIdentityを受信する
     async fn receive_identity(&self) -> Result<ServerIdentity, NetworkError> {
-        // サーバーが開いたIdentityストリームからデータを受信
         let response =
             self.transport.receive().await.map_err(|e| {
                 NetworkError::Protocol(format!("Failed to receive identity: {}", e))
@@ -141,26 +127,19 @@ impl ProtocolClient {
     }
 
     /// サーバーに接続し、チャネル名のリストに基づいて複数チャネルを開く
-    ///
-    /// 接続→Identity受信→全チャネル開設を一括で行う便利メソッド。
-    /// 各チャネルの型はコード生成側（ConnectionBuilder）で決定される。
     pub async fn connect_with_channels(
         &mut self,
         url: &str,
         channel_names: &[&str],
     ) -> Result<Vec<String>, NetworkError> {
-        // 接続（Identity受信を含む）
         UnisonClient::connect(self, url).await?;
 
-        // 各チャネルを開く（型はここでは不明なのでチャネル名のみ返す）
         let mut opened = Vec::new();
         for name in channel_names {
-            // チャネル登録はopen_channel呼び出し時に行われる
-            // ここではコンテキストに名前だけ予約
             self.context
                 .register_channel(super::context::ChannelHandle {
                     channel_name: name.to_string(),
-                    stream_id: 0, // open_channel時に更新される
+                    stream_id: 0,
                     direction: super::context::ChannelDirection::Bidirectional,
                 })
                 .await;
@@ -201,7 +180,6 @@ impl ProtocolClient {
     }
 
     pub async fn connect(&mut self, url: &str) -> Result<()> {
-        // Arc::get_mutを使用してmutableアクセス
         Arc::get_mut(&mut self.transport)
             .ok_or_else(|| anyhow::anyhow!("Failed to get mutable transport"))?
             .connect(url)
@@ -218,120 +196,7 @@ impl ProtocolClient {
     pub async fn is_connected(&self) -> bool {
         self.transport.is_connected().await
     }
-}
 
-impl ProtocolClientTrait for ProtocolClient {
-    async fn call<TRequest, TResponse>(&self, method: &str, request: TRequest) -> Result<TResponse>
-    where
-        TRequest: Serialize + Send + Sync,
-        TResponse: for<'de> Deserialize<'de>,
-    {
-        // Generate a unique request ID
-        let request_id = generate_request_id();
-
-        // Create the protocol message
-        let message = ProtocolMessage::new_with_json(
-            request_id,
-            method.to_string(),
-            MessageType::Request,
-            serde_json::to_value(request)?,
-        )?;
-
-        // Send the request
-        self.transport.send(message).await?;
-
-        // Wait for the response
-        // In a real implementation, this would use a proper request/response correlation mechanism
-        let response = self.transport.receive().await?;
-
-        if response.msg_type == MessageType::Error {
-            let payload_value = response
-                .payload_as_value()
-                .context("Failed to parse error payload")?;
-            return Err(anyhow::anyhow!(
-                "Protocol error: {}",
-                payload_value
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error")
-            ));
-        }
-
-        // Deserialize the response
-        let payload_value = response
-            .payload_as_value()
-            .context("Failed to parse response payload")?;
-        let result: TResponse =
-            serde_json::from_value(payload_value).context("Failed to deserialize response")?;
-
-        Ok(result)
-    }
-
-    async fn stream<TRequest, TResponse>(
-        &self,
-        method: &str,
-        request: TRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<TResponse>> + Send>>>
-    where
-        TRequest: Serialize + Send + Sync,
-        TResponse: for<'de> Deserialize<'de> + Send + 'static,
-    {
-        // Generate a unique request ID
-        let request_id = generate_request_id();
-
-        // Create the protocol message
-        let message = ProtocolMessage::new_with_json(
-            request_id,
-            method.to_string(),
-            MessageType::Stream,
-            serde_json::to_value(request)?,
-        )?;
-
-        // Send the stream request
-        self.transport.send(message).await?;
-
-        // Create a stream that receives messages
-        let transport = Arc::clone(&self.transport);
-        let stream = async_stream::stream! {
-            loop {
-                match transport.receive().await {
-                    Ok(msg) => {
-                        match msg.msg_type {
-                            MessageType::StreamData => {
-                                match msg.payload_as_value() {
-                                    Ok(payload_value) => {
-                                        match serde_json::from_value::<TResponse>(payload_value) {
-                                            Ok(data) => yield Ok(data),
-                                            Err(e) => yield Err(anyhow::anyhow!("Deserialization error: {}", e)),
-                                        }
-                                    }
-                                    Err(e) => yield Err(anyhow::anyhow!("Failed to parse payload: {}", e)),
-                                }
-                            }
-                            MessageType::StreamEnd => {
-                                break;
-                            }
-                            MessageType::Error => {
-                                let error_msg = msg.payload_as_value()
-                                    .ok()
-                                    .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
-                                    .unwrap_or_else(|| "Unknown error".to_string());
-                                yield Err(anyhow::anyhow!("Stream error: {}", error_msg));
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => {
-                        yield Err(e);
-                        break;
-                    }
-                }
-            }
-        };
-
-        Ok(Box::pin(stream))
-    }
 }
 
 fn generate_request_id() -> u64 {
@@ -365,47 +230,6 @@ impl UnisonClient for ProtocolClient {
         Ok(())
     }
 
-    async fn call(
-        &mut self,
-        method: &str,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, NetworkError> {
-        let request_id = generate_request_id();
-
-        let message = ProtocolMessage::new_with_json(
-            request_id,
-            method.to_string(),
-            MessageType::Request,
-            payload,
-        )?;
-
-        self.transport
-            .send(message)
-            .await
-            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
-
-        let response = self
-            .transport
-            .receive()
-            .await
-            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
-
-        if response.msg_type == MessageType::Error {
-            let payload_value = response.payload_as_value().map_err(|e| {
-                NetworkError::Protocol(format!("Failed to parse error payload: {}", e))
-            })?;
-            return Err(NetworkError::Protocol(
-                payload_value
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
-
-        response.payload_as_value()
-    }
-
     async fn disconnect(&mut self) -> Result<(), NetworkError> {
         Arc::get_mut(&mut self.transport)
             .ok_or_else(|| NetworkError::Connection("Failed to get mutable transport".to_string()))?
@@ -415,43 +239,6 @@ impl UnisonClient for ProtocolClient {
     }
 
     fn is_connected(&self) -> bool {
-        // これはトレイトで同期的である必要があります
-        false // 今のところ簡略化
+        false
     }
 }
-
-// DummyTransport removed - using QuicClient directly
-
-impl UnisonClientExt for ProtocolClient {
-    async fn start_system_stream(
-        &mut self,
-        method: &str,
-        _payload: serde_json::Value,
-    ) -> Result<crate::network::quic::UnisonStream, NetworkError> {
-        // use super::quic::UnisonStream;
-        use super::StreamHandle;
-
-        // Create a real QUIC bidirectional stream
-        let _handle = StreamHandle {
-            stream_id: generate_request_id(),
-            method: method.to_string(),
-            created_at: std::time::SystemTime::now(),
-        };
-
-        // QUICクライアントの接続を取得してUnisonStreamを作成
-        // 現在の実装では直接アクセスできないため、エラーを返す
-        Err(NetworkError::NotConnected)
-    }
-
-    async fn list_system_streams(&self) -> Result<Vec<super::StreamHandle>, NetworkError> {
-        // In a full implementation, this would track active streams
-        Ok(vec![])
-    }
-
-    async fn close_system_stream(&mut self, stream_id: u64) -> Result<(), NetworkError> {
-        tracing::info!("🔒 Closed SystemStream with ID: {}", stream_id);
-        Ok(())
-    }
-}
-
-// MockSystemStream removed - using UnisonStream directly
