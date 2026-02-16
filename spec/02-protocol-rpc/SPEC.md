@@ -113,11 +113,13 @@ struct UnisonError {
 
 ### 4.3 スキーマ例
 
+#### サービス定義例
+
 ```kdl
 protocol "user-management" version="1.0.0" {
     namespace "com.example.users"
     description "ユーザー管理サービス"
-    
+
     message "User" {
         description "ユーザーアカウント情報"
         field "id" type="string" required=true
@@ -126,10 +128,10 @@ protocol "user-management" version="1.0.0" {
         field "created_at" type="timestamp" required=true
         field "is_active" type="bool" required=false default=true
     }
-    
+
     service "UserService" {
         description "ユーザーアカウント管理操作"
-        
+
         method "create_user" {
             description "新しいユーザーアカウントを作成"
             request {
@@ -142,7 +144,7 @@ protocol "user-management" version="1.0.0" {
                 field "session_token" type="string" required=true
             }
         }
-        
+
         method "get_user" {
             description "IDによってユーザー情報を取得"
             request {
@@ -155,6 +157,89 @@ protocol "user-management" version="1.0.0" {
     }
 }
 ```
+
+#### チャネル定義例（creo_sync.kdl より抜粋）
+
+```kdl
+protocol "creo-sync" version="1.0.0" {
+    namespace "club.chronista.sync"
+
+    // Control Plane: クライアント起点の永続チャネル
+    channel "control" from="client" lifetime="persistent" {
+        send "Subscribe" {
+            field "category" type="string"
+            field "tags" type="string"
+        }
+        recv "Ack" {
+            field "status" type="string"
+            field "channel_ref" type="string"
+        }
+    }
+
+    // Data Plane: サーバー起点のイベント配信チャネル
+    channel "events" from="server" lifetime="persistent" {
+        send "MemoryEvent" {
+            field "event_type" type="string" required=#true
+            field "memory_id" type="string" required=#true
+            field "category" type="string"
+            field "from" type="string"
+            field "timestamp" type="string"
+        }
+    }
+
+    // Data Plane: トランジェントなクエリチャネル（エラー型付き）
+    channel "query" from="client" lifetime="transient" {
+        send "Query" {
+            field "method" type="string" required=#true
+            field "params" type="json"
+        }
+        recv "Result" {
+            field "data" type="json"
+        }
+        error "QueryError" {
+            field "code" type="string"
+            field "message" type="string"
+        }
+    }
+}
+```
+
+### 4.4 Channel 定義構文
+
+サービスメソッドに加えて、KDL スキーマでは `channel` キーワードによる型安全なストリームチャネルの定義をサポートする。
+
+#### 構文
+
+```kdl
+channel "<name>" from="<direction>" lifetime="<lifetime>" {
+    send "<MessageType>" {
+        field "<name>" type="<type>" [required=#true]
+    }
+    recv "<MessageType>" {
+        field "<name>" type="<type>" [required=#true]
+    }
+    error "<ErrorType>" {
+        field "<name>" type="<type>"
+    }
+}
+```
+
+#### 属性
+
+| 属性 | 値 | 説明 |
+|------|-----|------|
+| `from` | `"client"` / `"server"` / `"either"` | チャネルの方向性 |
+| `lifetime` | `"persistent"` / `"transient"` | チャネルのライフタイム |
+
+#### メッセージブロック
+
+| ブロック | 説明 |
+|---------|------|
+| `send` | 送信メッセージ型の定義 |
+| `recv` | 受信メッセージ型の定義（省略可: 一方向チャネル） |
+| `error` | チャネル固有エラー型の定義（省略可） |
+
+チャネル仕様の詳細は [spec/03: Stream Channel 仕様](../03-stream-channels/SPEC.md) を参照。
 
 ## 5. RPCメッセージフロー
 
@@ -228,7 +313,64 @@ pub trait UserServiceClient {
 }
 ```
 
-### 6.2 TypeScriptコード生成（計画中）
+### 6.2 Channel型 コード生成
+
+KDL スキーマの `channel` 定義から、Rust の `QuicBackedChannel<S, R>` 型を自動生成する。
+
+#### 生成対象
+
+| KDL 定義 | 生成される Rust コード |
+|----------|----------------------|
+| `send` ブロック | 送信メッセージ構造体 |
+| `recv` ブロック | 受信メッセージ構造体 |
+| `error` ブロック | エラー列挙型 |
+| `channel` 全体 | `QuicBackedChannel<Send, Recv>` の型エイリアス |
+
+#### 生成コード例
+
+creo_sync.kdl の `query` チャネルから生成されるコード:
+
+```rust
+// 送信メッセージ型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Query {
+    pub method: String,
+    pub params: Option<serde_json::Value>,
+}
+
+// 受信メッセージ型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResult {
+    pub data: Option<serde_json::Value>,
+}
+
+// エラー型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryError {
+    pub code: String,
+    pub message: String,
+}
+
+// チャネル型エイリアス
+pub type QueryChannel = QuicBackedChannel<Query, QueryResult>;
+```
+
+#### ConnectionBuilder パターン
+
+複数チャネルの一括開設には `ConnectionBuilder` パターンを使用する:
+
+```rust
+// コード生成で自動生成される接続ビルダー
+pub struct CreoSyncConnection {
+    pub control: QuicBackedChannel<Subscribe, Ack>,
+    pub events: QuicBackedChannel<MemoryEvent, ()>,
+    pub query: QuicBackedChannel<Query, QueryResult>,
+    pub messaging: QuicBackedChannel<CCMessage, CCMessage>,
+    pub urgent: QuicBackedChannel<Alert, ()>,
+}
+```
+
+### 6.3 TypeScriptコード生成（計画中）
 
 - **インターフェース定義**: すべての型のTypeScriptインターフェース
 - **クライアントクラス**: Promiseベースのクライアント実装
@@ -300,7 +442,6 @@ pub trait UserServiceClient {
 
 ### 10.1 計画中の機能
 
-- **ストリーミングサポート**: サーバー送信イベントと双方向ストリーミング
 - **スキーマ進化**: 実行時スキーマ更新とマイグレーション
 - **圧縮**: 大きなペイロード向けのメッセージ圧縮
 - **バッチ操作**: 単一リクエストでの複数操作
@@ -314,6 +455,7 @@ pub trait UserServiceClient {
 
 ### 仕様書
 - [spec/01: コアネットワーク](../01-core-concept/SPEC.md) - トランスポート層（QUIC）
+- [spec/03: Stream Channel](../03-stream-channels/SPEC.md) - チャネル仕様
 
 ### 設計ドキュメント
 - [KDLスキーマ例](../../schemas/) - 実際のスキーマ定義
@@ -324,6 +466,6 @@ pub trait UserServiceClient {
 
 ---
 
-**仕様バージョン**: 1.0.0
-**最終更新**: 2025-11-05
+**仕様バージョン**: 1.1.0
+**最終更新**: 2026-02-16
 **ステータス**: Draft
