@@ -50,6 +50,9 @@ assets/certs/*.der
 # Cargo local configuration (macOS linker settings)
 .cargo/config.toml
 
+# MCP configuration (local)
+.mcp.json
+
 # Serena MCP server cache
 .serena/
 .vantage/
