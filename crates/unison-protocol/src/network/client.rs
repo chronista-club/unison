@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use super::channel::UnisonChannel;
 use super::context::ConnectionContext;
 use super::identity::ServerIdentity;
-use super::quic::{QuicClient, UnisonStream, write_frame};
+use super::quic::{FRAME_TYPE_PROTOCOL, QuicClient, UnisonStream, write_typed_frame};
 use super::service::Service;
 use super::{MessageType, NetworkError, ProtocolMessage, UnisonClient};
 
@@ -80,7 +80,7 @@ impl ProtocolClient {
             NetworkError::Protocol(format!("Failed to create channel frame: {}", e))
         })?;
         let frame_bytes = frame.to_bytes();
-        write_frame(&mut send_stream, &frame_bytes)
+        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes)
             .await
             .map_err(|e| NetworkError::Protocol(format!("Failed to send channel open: {}", e)))?;
 

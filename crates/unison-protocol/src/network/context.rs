@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::identity::ServerIdentity;
 
 /// 接続ごとの状態を管理する構造体
+#[derive(Debug)]
 pub struct ConnectionContext {
     /// 接続の一意識別子
     pub connection_id: Uuid,

@@ -71,7 +71,8 @@ use parser::{ParseError as UnisonParseError, ParsedSchema, SchemaParser};
 
 // よく使用されるトレイトとクライアント/サーバーの再エクスポート
 pub use network::{
-    NetworkError, ProtocolClient, ProtocolServer, UnisonChannel, UnisonClient, UnisonServer,
+    ConnectionEvent, NetworkError, ProtocolClient, ProtocolServer, ServerHandle, UnisonChannel,
+    UnisonClient, UnisonServer,
 };
 
 /// Unison Protocolのメインエントリポイント

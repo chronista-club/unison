@@ -5,6 +5,31 @@
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に基づいており、
 このプロジェクトは [セマンティックバージョニング](https://semver.org/lang/ja/) に準拠しています。
 
+## [0.3.0] - 2026-02-20
+
+### 追加
+- `ServerHandle`: `spawn_listen()` によるバックグラウンド起動とグレースフルシャットダウン
+  - `shutdown()`: グレースフルシャットダウン
+  - `is_finished()`: 終了状態の確認
+  - `local_addr()`: バインドアドレスの取得
+- `ConnectionEvent`: 接続/切断のリアルタイム通知
+  - `Connected { remote_addr, context }` / `Disconnected { remote_addr }`
+  - `subscribe_connection_events()` で購読
+- Raw bytes チャネルサポート: rkyv/zstd をバイパスした最小オーバーヘッドのバイナリ通信
+  - `UnisonChannel::send_raw()` / `recv_raw()`
+  - Typed Frame フォーマット: `[4B length][1B type tag][payload]`（0x00=Protocol, 0x01=Raw）
+- `UnisonStream::send_frame()` / `recv_frame()` / `recv_typed_frame()`: フレームベースの直接 I/O
+- `UnisonStream::close_stream()`: `&self` で呼べるストリームクローズ
+
+### 修正
+- チャネル通信の二重ラッピングバグを修正（ProtocolMessage が二重にネストされていた）
+- `SystemStream::receive()` の `read_to_end` 問題を修正（マルチメッセージ通信が不可能だった）
+- `UnisonChannel` のストリーム参照を `Arc<Mutex<UnisonStream>>` → `Arc<UnisonStream>` に簡素化
+
+### 変更
+- チャネル内部の送受信を `SystemStream` 経由から直接フレーム I/O に移行
+- README.md を v0.2 以降の現状に合わせて全面更新
+
 ## [0.2.0] - 2026-02-16
 
 ### 追加

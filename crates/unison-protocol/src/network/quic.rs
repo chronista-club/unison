@@ -54,6 +54,59 @@ pub async fn write_frame(send: &mut SendStream, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// フレームタイプタグ
+pub const FRAME_TYPE_PROTOCOL: u8 = 0x00;
+pub const FRAME_TYPE_RAW: u8 = 0x01;
+
+/// Typed フレーム — type tag 付きの読み書き
+/// フォーマット: [4 bytes: length][1 byte: type tag][payload]
+/// length は type tag + payload の合計バイト数
+///
+/// Typed フレームの読み取り — type tag とペイロードを返す
+pub async fn read_typed_frame(recv: &mut RecvStream) -> Result<(u8, bytes::Bytes)> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .context("Failed to read frame length")?;
+    let total_len = u32::from_be_bytes(len_buf) as usize;
+    if total_len == 0 {
+        return Err(anyhow::anyhow!("Empty frame"));
+    }
+    if total_len > MAX_MESSAGE_SIZE {
+        return Err(anyhow::anyhow!("Frame too large: {} bytes", total_len));
+    }
+
+    // type tag を読む
+    let mut type_buf = [0u8; 1];
+    recv.read_exact(&mut type_buf)
+        .await
+        .context("Failed to read frame type tag")?;
+    let frame_type = type_buf[0];
+
+    // payload を読む
+    let payload_len = total_len - 1;
+    let mut data = vec![0u8; payload_len];
+    recv.read_exact(&mut data)
+        .await
+        .context("Failed to read frame payload")?;
+    Ok((frame_type, bytes::Bytes::from(data)))
+}
+
+/// Typed フレームの書き込み
+pub async fn write_typed_frame(send: &mut SendStream, frame_type: u8, data: &[u8]) -> Result<()> {
+    let total_len = (1 + data.len()) as u32;
+    send.write_all(&total_len.to_be_bytes())
+        .await
+        .context("Failed to write frame length")?;
+    send.write_all(&[frame_type])
+        .await
+        .context("Failed to write frame type tag")?;
+    send.write_all(data)
+        .await
+        .context("Failed to write frame payload")?;
+    Ok(())
+}
+
 /// Embedded certificates for development use
 #[derive(RustEmbed)]
 #[folder = "assets/certs"]
@@ -506,6 +559,11 @@ impl QuicServer {
         Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr))
     }
 
+    /// バインド済みのローカルアドレスを取得
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.endpoint.as_ref().and_then(|ep| ep.local_addr().ok())
+    }
+
     pub async fn start(&self) -> Result<()> {
         let endpoint = self
             .endpoint
@@ -530,6 +588,52 @@ impl QuicServer {
 
         Ok(())
     }
+
+    /// shutdown シグナルを受け付けるバージョンの start
+    pub async fn start_with_shutdown(
+        &self,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .context("Server not bound to an address")?;
+
+        info!("QUIC server listening for connections (with shutdown support)");
+
+        loop {
+            tokio::select! {
+                connecting = endpoint.accept() => {
+                    match connecting {
+                        Some(connecting) => {
+                            let connection = connecting.await?;
+                            let remote_addr = connection.remote_address();
+                            info!("New QUIC connection from: {}", remote_addr);
+
+                            let server = Arc::clone(&self.server);
+                            let ctx = Arc::new(ConnectionContext::new());
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(connection, server, ctx).await {
+                                    error!("Connection error: {}", e);
+                                }
+                            });
+                        }
+                        None => {
+                            info!("QUIC endpoint closed");
+                            break;
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    info!("Shutdown signal received, stopping server");
+                    endpoint.close(quinn::VarInt::from_u32(0), b"server shutdown");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 async fn handle_connection(
@@ -537,6 +641,8 @@ async fn handle_connection(
     server: Arc<ProtocolServer>,
     ctx: Arc<ConnectionContext>,
 ) -> Result<()> {
+    let remote_addr = connection.remote_address();
+
     // Identity Handshake: 接続直後にServerIdentityを送信
     let identity = server.build_identity().await;
     ctx.set_identity(identity.clone()).await;
@@ -559,6 +665,14 @@ async fn handle_connection(
         }
     }
 
+    // 接続イベントを送信
+    server
+        .emit_connection_event(super::server::ConnectionEvent::Connected {
+            remote_addr,
+            context: Arc::clone(&ctx),
+        })
+        .await;
+
     loop {
         let connection_clone = connection.clone();
         match connection.accept_bi().await {
@@ -568,24 +682,19 @@ async fn handle_connection(
                 let ctx = Arc::clone(&ctx);
 
                 tokio::spawn(async move {
-                    // まずフレームベースの読み取りを試行（チャネル対応）
-                    // フォールバック: 旧形式（read_to_end）も試す
-                    let request_result = match read_frame(&mut recv_stream).await {
-                        Ok(frame_bytes) => ProtocolFrame::from_bytes(&frame_bytes)
-                            .and_then(|frame| ProtocolMessage::from_frame(&frame)),
-                        Err(_) => {
-                            // read_to_end にフォールバック（旧クライアント互換）
-                            match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
-                                Ok(data) => {
-                                    let frame_bytes = bytes::Bytes::from(data);
-                                    ProtocolFrame::from_bytes(&frame_bytes)
-                                        .and_then(|frame| ProtocolMessage::from_frame(&frame))
-                                }
-                                Err(e) => {
-                                    error!("Failed to read from stream: {}", e);
-                                    return;
-                                }
-                            }
+                    // typed frame で読み取り（type tag 付き）
+                    let request_result = match read_typed_frame(&mut recv_stream).await {
+                        Ok((FRAME_TYPE_PROTOCOL, frame_bytes)) => {
+                            ProtocolFrame::from_bytes(&frame_bytes)
+                                .and_then(|frame| ProtocolMessage::from_frame(&frame))
+                        }
+                        Ok((frame_type, _)) => {
+                            warn!("Unexpected frame type in handshake: 0x{:02x}", frame_type);
+                            return;
+                        }
+                        Err(e) => {
+                            error!("Failed to read handshake frame: {}", e);
+                            return;
                         }
                     };
 
@@ -631,10 +740,20 @@ async fn handle_connection(
             }
             Err(quinn::ConnectionError::ApplicationClosed(_)) => {
                 info!("Client disconnected");
+                server
+                    .emit_connection_event(super::server::ConnectionEvent::Disconnected {
+                        remote_addr,
+                    })
+                    .await;
                 break;
             }
             Err(e) => {
                 error!("Failed to accept stream: {}", e);
+                server
+                    .emit_connection_event(super::server::ConnectionEvent::Disconnected {
+                        remote_addr,
+                    })
+                    .await;
                 break;
             }
         }
@@ -764,6 +883,136 @@ impl UnisonStream {
             recv_stream: Arc::new(Mutex::new(Some(recv_stream))),
             is_active: Arc::new(AtomicBool::new(true)),
             handle,
+        }
+    }
+}
+
+/// Typed フレーム受信結果
+pub enum TypedFrame {
+    /// ProtocolMessage フレーム (type tag 0x00)
+    Protocol(ProtocolMessage),
+    /// Raw bytes フレーム (type tag 0x01)
+    Raw(Vec<u8>),
+}
+
+impl UnisonStream {
+    /// ProtocolMessage を typed フレームとして送信（type tag 0x00）
+    ///
+    /// SystemStream::send() を経由せず、ProtocolMessage → into_frame() → write_typed_frame() で
+    /// type tag 付き length-prefixed フレームとして送信する。チャネル通信で使用。
+    pub async fn send_frame(&self, msg: &ProtocolMessage) -> Result<(), NetworkError> {
+        if !self.is_active() {
+            return Err(NetworkError::Connection("Stream is not active".to_string()));
+        }
+
+        let frame = msg.clone().into_frame()?;
+        let frame_bytes = frame.to_bytes();
+
+        let mut send_guard = self.send_stream.lock().await;
+        if let Some(send_stream) = send_guard.as_mut() {
+            write_typed_frame(send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes)
+                .await
+                .map_err(|e| NetworkError::Quic(format!("Failed to send frame: {}", e)))?;
+            Ok(())
+        } else {
+            Err(NetworkError::Connection(
+                "Send stream is closed".to_string(),
+            ))
+        }
+    }
+
+    /// Raw bytes を typed フレームとして送信（type tag 0x01）
+    ///
+    /// rkyv/zstd をバイパスし、length-prefix + type tag + raw payload のみ。
+    /// オーディオストリーミング等の最小オーバーヘッド通信に使用。
+    pub async fn send_raw_frame(&self, data: &[u8]) -> Result<(), NetworkError> {
+        if !self.is_active() {
+            return Err(NetworkError::Connection("Stream is not active".to_string()));
+        }
+
+        let mut send_guard = self.send_stream.lock().await;
+        if let Some(send_stream) = send_guard.as_mut() {
+            write_typed_frame(send_stream, FRAME_TYPE_RAW, data)
+                .await
+                .map_err(|e| NetworkError::Quic(format!("Failed to send raw frame: {}", e)))?;
+            Ok(())
+        } else {
+            Err(NetworkError::Connection(
+                "Send stream is closed".to_string(),
+            ))
+        }
+    }
+
+    /// ストリームを閉じる（&self で呼べるバージョン、Arc 共有時に使用）
+    pub async fn close_stream(&self) -> Result<(), NetworkError> {
+        self.is_active.store(false, Ordering::SeqCst);
+
+        if let Some(mut send_stream) = self.send_stream.lock().await.take() {
+            send_stream
+                .finish()
+                .map_err(|e| NetworkError::Quic(format!("Failed to close send stream: {}", e)))?;
+        }
+
+        if let Some(mut recv_stream) = self.recv_stream.lock().await.take() {
+            recv_stream.stop(quinn::VarInt::from_u32(0)).map_err(|e| {
+                NetworkError::Quic(format!("Failed to close receive stream: {}", e))
+            })?;
+        }
+
+        info!(
+            "Stream {} closed for method '{}'",
+            self.stream_id, self.method
+        );
+        Ok(())
+    }
+
+    /// ProtocolMessage のみを受信（後方互換）
+    ///
+    /// typed frame を読んで ProtocolMessage のみを返す。
+    /// Raw bytes フレームが来た場合はエラーを返す。
+    pub async fn recv_frame(&self) -> Result<ProtocolMessage, NetworkError> {
+        match self.recv_typed_frame().await? {
+            TypedFrame::Protocol(msg) => Ok(msg),
+            TypedFrame::Raw(_) => Err(NetworkError::Protocol(
+                "Expected protocol frame, got raw bytes".to_string(),
+            )),
+        }
+    }
+
+    /// Typed フレームを受信（ProtocolMessage or Raw bytes）
+    ///
+    /// type tag で振り分けて TypedFrame を返す。
+    /// チャネルの recv ループで使用し、Protocol/Raw を適切なキューに振り分ける。
+    pub async fn recv_typed_frame(&self) -> Result<TypedFrame, NetworkError> {
+        if !self.is_active() {
+            return Err(NetworkError::Connection("Stream is not active".to_string()));
+        }
+
+        let mut recv_guard = self.recv_stream.lock().await;
+        if let Some(recv_stream) = recv_guard.as_mut() {
+            let (frame_type, payload) = read_typed_frame(recv_stream)
+                .await
+                .map_err(|e| {
+                    self.is_active.store(false, Ordering::SeqCst);
+                    NetworkError::Quic(format!("Failed to read frame: {}", e))
+                })?;
+
+            match frame_type {
+                FRAME_TYPE_PROTOCOL => {
+                    let frame = ProtocolFrame::from_bytes(&payload)?;
+                    let message = ProtocolMessage::from_frame(&frame)?;
+                    Ok(TypedFrame::Protocol(message))
+                }
+                FRAME_TYPE_RAW => Ok(TypedFrame::Raw(payload.to_vec())),
+                _ => Err(NetworkError::Protocol(format!(
+                    "Unknown frame type tag: 0x{:02x}",
+                    frame_type
+                ))),
+            }
+        } else {
+            Err(NetworkError::Connection(
+                "Receive stream is closed".to_string(),
+            ))
         }
     }
 }

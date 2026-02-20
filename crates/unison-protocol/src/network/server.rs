@@ -1,12 +1,26 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
 use super::service::Service;
 use super::{NetworkError, UnisonServer};
+
+/// 接続イベント通知
+#[derive(Debug, Clone)]
+pub enum ConnectionEvent {
+    /// 新しい接続が確立された
+    Connected {
+        remote_addr: SocketAddr,
+        context: Arc<super::context::ConnectionContext>,
+    },
+    /// 接続が切断された
+    Disconnected { remote_addr: SocketAddr },
+}
 
 /// チャネルハンドラー型（接続コンテキスト + UnisonStreamを受け取る）
 pub type ChannelHandler = Arc<
@@ -18,6 +32,37 @@ pub type ChannelHandler = Arc<
         + Sync,
 >;
 
+/// サーバーのライフサイクルを管理するハンドル
+///
+/// `spawn_listen()` が返す。shutdown シグナル送信と完了待ちを提供。
+pub struct ServerHandle {
+    join_handle: JoinHandle<Result<(), NetworkError>>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    local_addr: SocketAddr,
+}
+
+impl ServerHandle {
+    /// サーバーをグレースフルにシャットダウンし、完了を待つ
+    pub async fn shutdown(mut self) -> Result<(), NetworkError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.join_handle
+            .await
+            .map_err(|e| NetworkError::Quic(format!("Server task panicked: {}", e)))?
+    }
+
+    /// サーバータスクが終了済みかどうか
+    pub fn is_finished(&self) -> bool {
+        self.join_handle.is_finished()
+    }
+
+    /// サーバーがバインドしたローカルアドレスを取得
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+}
+
 /// プロトコルサーバー実装
 pub struct ProtocolServer {
     services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
@@ -28,6 +73,8 @@ pub struct ProtocolServer {
     server_namespace: String,
     /// チャネルハンドラー（チャネル名 → ハンドラー関数）
     channel_handlers: Arc<RwLock<HashMap<String, ChannelHandler>>>,
+    /// 接続イベント送信チャネル
+    connection_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<ConnectionEvent>>>>,
 }
 
 impl ProtocolServer {
@@ -39,6 +86,7 @@ impl ProtocolServer {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             server_namespace: "default".to_string(),
             channel_handlers: Arc::new(RwLock::new(HashMap::new())),
+            connection_event_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -95,6 +143,27 @@ impl ProtocolServer {
         handlers.insert(name.to_string(), handler);
     }
 
+    /// 接続イベントを購読する
+    ///
+    /// 接続/切断時に `ConnectionEvent` を受信できる。
+    /// 複数回呼ぶと最後の Receiver だけが有効になる。
+    pub async fn subscribe_connection_events(
+        &self,
+    ) -> tokio::sync::mpsc::Receiver<ConnectionEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut guard = self.connection_event_tx.write().await;
+        *guard = Some(tx);
+        rx
+    }
+
+    /// 接続イベントを送信（内部用）
+    pub(crate) async fn emit_connection_event(&self, event: ConnectionEvent) {
+        let guard = self.connection_event_tx.read().await;
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(event).await;
+        }
+    }
+
     /// チャネルハンドラーを取得
     pub async fn get_channel_handler(&self, name: &str) -> Option<ChannelHandler> {
         let handlers = self.channel_handlers.read().await;
@@ -134,6 +203,55 @@ impl ProtocolServer {
 
 }
 
+impl ProtocolServer {
+    /// バックグラウンドでサーバーを起動し、ServerHandle を返す
+    ///
+    /// `ServerHandle::shutdown()` でグレースフルに停止できる。
+    pub async fn spawn_listen(self, addr: &str) -> Result<ServerHandle, NetworkError> {
+        use super::quic::QuicServer;
+
+        let protocol_server = Arc::new(self);
+
+        let mut quic_server = QuicServer::new(Arc::clone(&protocol_server));
+        quic_server
+            .bind(addr)
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()))?;
+
+        let local_addr = quic_server
+            .local_addr()
+            .ok_or_else(|| NetworkError::Quic("Server not bound".to_string()))?;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        {
+            let mut running = protocol_server.running.write().await;
+            *running = true;
+        }
+
+        tracing::info!("Unison Protocol server spawned on {} via QUIC", local_addr);
+
+        let server_clone = Arc::clone(&protocol_server);
+        let join_handle = tokio::spawn(async move {
+            let result = quic_server
+                .start_with_shutdown(shutdown_rx)
+                .await
+                .map_err(|e| NetworkError::Quic(e.to_string()));
+
+            let mut running = server_clone.running.write().await;
+            *running = false;
+
+            result
+        });
+
+        Ok(ServerHandle {
+            join_handle,
+            shutdown_tx: Some(shutdown_tx),
+            local_addr,
+        })
+    }
+}
+
 impl Default for ProtocolServer {
     fn default() -> Self {
         Self::new()
@@ -158,6 +276,7 @@ impl UnisonServer for ProtocolServer {
             server_version: self.server_version.clone(),
             server_namespace: self.server_namespace.clone(),
             channel_handlers: Arc::clone(&self.channel_handlers),
+            connection_event_tx: Arc::clone(&self.connection_event_tx),
         });
 
         let mut quic_server = QuicServer::new(protocol_server);

@@ -14,8 +14,8 @@ pub mod service;
 
 pub use channel::UnisonChannel;
 pub use client::ProtocolClient;
-pub use quic::{QuicClient, QuicServer, UnisonStream};
-pub use server::ProtocolServer;
+pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
+pub use server::{ConnectionEvent, ProtocolServer, ServerHandle};
 pub use service::{
     RealtimeService, Service, ServiceConfig, ServicePriority, ServiceStats, UnisonService,
 };

@@ -3,7 +3,7 @@
 //! 各ChannelはQUICストリームにマッピングされ、
 //! 独立したHoL Blocking境界を形成する。
 //!
-//! `UnisonChannel` — 統合チャネル型（request/response + event push）
+//! `UnisonChannel` — 統合チャネル型（request/response + event push + raw bytes）
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,21 +12,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{NetworkError, ProtocolMessage, MessageType};
-use super::quic::UnisonStream;
+use super::quic::{TypedFrame, UnisonStream};
+use super::{MessageType, NetworkError, ProtocolMessage};
 
-/// 統合チャネル型 — Request/Response と Event の両パターンをサポート
+/// 統合チャネル型 — Request/Response、Event、Raw bytes をサポート
 ///
-/// 内部に recv ループを持ち、受信メッセージを振り分ける:
-/// - `Response` → pending の oneshot に送る
-/// - `Event` / その他 → event_rx に流す
+/// 内部に recv ループを持ち、受信フレームを type tag で振り分ける:
+/// - Protocol frame (0x00):
+///   - `Response` → pending の oneshot に送る
+///   - `Event` / その他 → event_rx に流す
+/// - Raw frame (0x01) → raw_rx に流す
 pub struct UnisonChannel {
     /// QUIC ストリームへの参照（送信用）
-    stream: Arc<Mutex<UnisonStream>>,
+    stream: Arc<UnisonStream>,
     /// 応答待ちの Request を管理（message_id → oneshot::Sender）
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>>,
     /// Event 受信キュー
     event_rx: Mutex<mpsc::Receiver<ProtocolMessage>>,
+    /// Raw bytes 受信キュー
+    raw_rx: Mutex<mpsc::Receiver<Vec<u8>>>,
     /// メッセージ ID カウンター
     next_id: AtomicU64,
     /// バックグラウンド受信タスク
@@ -36,67 +40,58 @@ pub struct UnisonChannel {
 impl UnisonChannel {
     /// UnisonStream から UnisonChannel を構築し、recv ループを起動する
     pub fn new(stream: UnisonStream) -> Self {
-        let stream = Arc::new(Mutex::new(stream));
+        let stream = Arc::new(stream);
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ProtocolMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::channel(256);
+        let (raw_tx, raw_rx) = mpsc::channel(256);
 
-        // recv ループ
+        // recv ループ — recv_typed_frame() で type tag ベースの振り分け
         let recv_stream = Arc::clone(&stream);
         let recv_pending = Arc::clone(&pending);
         let recv_task = tokio::spawn(async move {
             loop {
-                let msg = {
-                    let mut s = recv_stream.lock().await;
-                    match super::SystemStream::receive(&mut *s).await {
-                        Ok(value) => {
-                            // ProtocolMessage として解釈
-                            match serde_json::from_value::<ProtocolMessage>(value) {
-                                Ok(msg) => msg,
-                                Err(_) => continue,
-                            }
-                        }
-                        Err(_) => {
-                            // 接続断 — 全 pending を Error で解決
-                            let mut map = recv_pending.lock().await;
-                            for (_, sender) in map.drain() {
-                                if let Ok(err_msg) = ProtocolMessage::new_with_json(
-                                    0,
-                                    "error".to_string(),
-                                    MessageType::Error,
-                                    serde_json::json!({"error": "connection closed"}),
-                                ) {
-                                    let _ = sender.send(err_msg);
+                match recv_stream.recv_typed_frame().await {
+                    Ok(TypedFrame::Protocol(msg)) => {
+                        match msg.msg_type {
+                            MessageType::Response => {
+                                let mut map = recv_pending.lock().await;
+                                if let Some(sender) = map.remove(&msg.id) {
+                                    let _ = sender.send(msg);
                                 }
                             }
-                            break;
+                            MessageType::Error => {
+                                let mut map = recv_pending.lock().await;
+                                if let Some(sender) = map.remove(&msg.id) {
+                                    let _ = sender.send(msg);
+                                } else {
+                                    drop(map);
+                                    let _ = event_tx.send(msg).await;
+                                }
+                            }
+                            _ => {
+                                // Event, Request, その他 → event_rx に流す
+                                let _ = event_tx.send(msg).await;
+                            }
                         }
                     }
-                };
-
-                match msg.msg_type {
-                    MessageType::Response => {
-                        // pending マップから oneshot を取得して解決
+                    Ok(TypedFrame::Raw(data)) => {
+                        let _ = raw_tx.send(data).await;
+                    }
+                    Err(_) => {
+                        // 接続断 — 全 pending を Error で解決
                         let mut map = recv_pending.lock().await;
-                        if let Some(sender) = map.remove(&msg.id) {
-                            let _ = sender.send(msg);
+                        for (_, sender) in map.drain() {
+                            if let Ok(err_msg) = ProtocolMessage::new_with_json(
+                                0,
+                                "error".to_string(),
+                                MessageType::Error,
+                                serde_json::json!({"error": "connection closed"}),
+                            ) {
+                                let _ = sender.send(err_msg);
+                            }
                         }
-                    }
-                    MessageType::Error => {
-                        // response_to が設定されていれば pending を解決
-                        // そうでなければ event として流す
-                        let mut map = recv_pending.lock().await;
-                        // Error メッセージの id で pending を探す
-                        if let Some(sender) = map.remove(&msg.id) {
-                            let _ = sender.send(msg);
-                        } else {
-                            drop(map);
-                            let _ = event_tx.send(msg).await;
-                        }
-                    }
-                    _ => {
-                        // Event, Request, その他 → event_rx に流す
-                        let _ = event_tx.send(msg).await;
+                        break;
                     }
                 }
             }
@@ -106,6 +101,7 @@ impl UnisonChannel {
             stream,
             pending,
             event_rx: Mutex::new(event_rx),
+            raw_rx: Mutex::new(raw_rx),
             next_id: AtomicU64::new(1),
             recv_task: Mutex::new(Some(recv_task)),
         }
@@ -129,20 +125,14 @@ impl UnisonChannel {
             map.insert(id, tx);
         }
 
-        // Request メッセージを送信
+        // Request メッセージを直接フレームとして送信
         let msg = ProtocolMessage::new_with_json(
             id,
             method.to_string(),
             MessageType::Request,
             payload,
         )?;
-        {
-            let mut stream = self.stream.lock().await;
-            let value = serde_json::to_value(&msg).map_err(|e| {
-                NetworkError::Protocol(format!("Failed to serialize message: {}", e))
-            })?;
-            super::SystemStream::send(&mut *stream, value).await?;
-        }
+        self.stream.send_frame(&msg).await?;
 
         // Response を待つ
         let response = rx.await.map_err(|_| {
@@ -173,11 +163,7 @@ impl UnisonChannel {
             MessageType::Event,
             payload,
         )?;
-        let mut stream = self.stream.lock().await;
-        let value = serde_json::to_value(&msg).map_err(|e| {
-            NetworkError::Protocol(format!("Failed to serialize message: {}", e))
-        })?;
-        super::SystemStream::send(&mut *stream, value).await
+        self.stream.send_frame(&msg).await
     }
 
     /// Request に対する Response 送信（サーバー側パターン）
@@ -196,11 +182,24 @@ impl UnisonChannel {
             MessageType::Response,
             payload,
         )?;
-        let mut stream = self.stream.lock().await;
-        let value = serde_json::to_value(&msg).map_err(|e| {
-            NetworkError::Protocol(format!("Failed to serialize message: {}", e))
-        })?;
-        super::SystemStream::send(&mut *stream, value).await
+        self.stream.send_frame(&msg).await
+    }
+
+    /// Raw bytes 送信（rkyv/zstd をバイパス、最小オーバーヘッド）
+    ///
+    /// オーディオストリーミング等のバイナリデータに使用。
+    pub async fn send_raw(&self, data: &[u8]) -> Result<(), NetworkError> {
+        self.stream.send_raw_frame(data).await
+    }
+
+    /// Raw bytes 受信
+    ///
+    /// recv ループが type tag 0x01 のフレームを受信すると raw_rx に流す。
+    pub async fn recv_raw(&self) -> Result<Vec<u8>, NetworkError> {
+        let mut rx = self.raw_rx.lock().await;
+        rx.recv().await.ok_or_else(|| {
+            NetworkError::Protocol("Raw channel closed".to_string())
+        })
     }
 
     /// Event 受信（サーバーからのプッシュ、または非 Response メッセージ）
@@ -218,7 +217,6 @@ impl UnisonChannel {
             task.abort();
         }
         // ストリームを閉じる
-        let mut stream = self.stream.lock().await;
-        super::SystemStream::close(&mut *stream).await
+        self.stream.close_stream().await
     }
 }
