@@ -24,6 +24,51 @@ _次世代型の型安全通信プロトコルフレームワーク_
 - **組み込みセキュリティ**: TLS 1.3 完全暗号化と開発用証明書の自動生成
 - **ゼロコピー通信**: rkyv ベースの効率的なパケットシリアライゼーション + 2KB 以上の自動 zstd 圧縮
 
+## ワークスペースクレート
+
+| クレート | 説明 | 状態 |
+|---------|------|------|
+| [`unison-protocol`](crates/unison-protocol) | コアプロトコルライブラリ — KDL スキーマ、QUIC トランスポート、チャネル、パケット | Active |
+| [`unison-agent`](crates/unison-agent) | Claude Agent SDK と Unison Protocol の統合 | Active |
+| [`unison-cli`](crates/unison-cli) | CLI ツール — スキーマ生成、開発ユーティリティ | Scaffolded |
+| [`unison-network`](crates/unison-network) | 高レベルネットワーク抽象化（P2P、メッシュ） | Placeholder |
+
+### unison-protocol
+
+コアクレート。crates.io では `unison` として公開。以下を含む:
+- KDL スキーマパーサーとコードジェネレーター（Rust/TypeScript）
+- QUIC トランスポート層（Quinn 経由）
+- `ProtocolServer` / `ProtocolClient` / `UnisonChannel`
+- `UnisonPacket`（rkyv ゼロコピーシリアライゼーション + zstd 圧縮）
+- Identity Handshake と Connection Events
+
+### unison-agent
+
+[Claude Agent SDK](https://crates.io/crates/claude-agent-sdk) と Unison Protocol を統合するクレート。`AgentClient`（単発・バッチクエリ）、`InteractiveClient`（マルチターン会話）、`UnisonTools`（Unison チャネルを MCP ツールとして Claude Agent に公開）を提供。
+
+**Examples** (`crates/unison-agent/examples/`):
+
+| Example | 説明 |
+|---------|------|
+| `simple_query` | AgentClient 経由の単発クエリ |
+| `batch_query` | 複数クエリの逐次処理 |
+| `interactive_chat` | InteractiveClient によるマルチターン会話 |
+| `unison_direct_demo` | Unison Protocol 直接統合 |
+| `unison_mcp_demo` | Unison チャネルを MCP ツールとして公開 |
+
+```bash
+# Example の実行
+cargo run -p unison-agent --example simple_query
+```
+
+### unison-cli
+
+Unison Protocol の CLI。バイナリ名: `unison`。スキーマ生成、開発ツール、ユーティリティを提供予定。現在はスキャフォールド段階（main 関数のみ）。
+
+### unison-network
+
+P2P やメッシュネットワーキングの高レベル抽象化を予定。現在はプレースホルダー（実装なし）。`unison-protocol` と Quinn に依存。
+
 ## クイックスタート
 
 ### インストール
@@ -74,6 +119,7 @@ protocol "my-service" version="1.0.0" {
 use unison::{ProtocolServer, NetworkError};
 use unison::network::UnisonChannel;
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,21 +127,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "my-server", "1.0.0", "com.example.myservice",
     );
 
-    // 接続イベントの購読
-    let mut events = server.subscribe_connection_events().await;
+    // 接続イベントの購読（同期メソッド — broadcast::Receiver を直接返す）
+    let mut events = server.subscribe_connection_events();
     tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
+        // broadcast::Receiver::recv() は Result を返す（Option ではない）
+        while let Ok(event) = events.recv().await {
             println!("接続イベント: {:?}", event);
         }
     });
 
     // チャネルハンドラーの登録
+    // ハンドラーは (Arc<ConnectionContext>, UnisonStream) を受け取り Result<(), NetworkError> を返す
     server.register_channel("users", |_ctx, stream| async move {
         let channel = UnisonChannel::new(stream);
         loop {
             match channel.recv().await {
                 Ok(msg) => {
-                    // request を処理して response を返す
                     channel.send_response(msg.id, &msg.method, json!({"id": "1"})).await?;
                 }
                 Err(_) => break,
@@ -122,7 +169,7 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = ProtocolClient::new_default()?;
+    let client = ProtocolClient::new_default()?;
     client.connect("[::1]:8080").await?;
 
     // チャネル経由の Request/Response
@@ -152,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // オーディオデータ等のバイナリストリーミング
 let audio = client.open_channel("audio").await?;
 
-// 送信側: rkyv/zstd をバイパスした最小オーバーヘッド通信
+// 送信側: 最小オーバーヘッド、rkyv/zstd をバイパス
 audio.send_raw(&pcm_data).await?;
 
 // 受信側
@@ -163,7 +210,7 @@ let data = audio.recv_raw().await?;
 
 ### Unified Channel
 
-v0.2.0 で RPC を全廃し、全通信をチャネルに統合した。
+v0.2.0 で RPC を完全に廃止し、全通信をチャネルに統一。
 
 ```
 Client                              Server
@@ -171,51 +218,52 @@ Client                              Server
   |-- open_channel("users") ---------> |  (QUIC bidi stream)
   |                                    |
   |<-- UnisonChannel ----------------->|  UnisonChannel
-  |    .request()    → Protocol frame  |    .recv()
-  |    .send_event() → Protocol frame  |    .send_response()
-  |    .send_raw()   → Raw frame      |    .send_raw()
-  |    .recv()       ← Protocol frame  |    .recv_raw()
-  |    .recv_raw()   ← Raw frame      |
+  |    .request()    -> Protocol frame  |    .recv()
+  |    .send_event() -> Protocol frame  |    .send_response()
+  |    .send_raw()   -> Raw frame      |    .send_raw()
+  |    .recv()       <- Protocol frame  |    .recv_raw()
+  |    .recv_raw()   <- Raw frame      |
 ```
 
-### Typed Frame フォーマット
+### Typed Frame Format
 
 ```
 [4 bytes: length][1 byte: type tag][payload]
 
 type tag:
-  0x00 = Protocol frame (ProtocolMessage → rkyv/zstd)
-  0x01 = Raw frame (生バイト、シリアライズなし)
+  0x00 = Protocol frame (ProtocolMessage -> rkyv/zstd)
+  0x01 = Raw frame (raw bytes, no serialization)
 ```
 
-### コンポーネント構造
+### コンポーネント構成
 
 ```
 unison/
-|-- コア層
+|-- Core Layer
 |   |-- parser/          # KDL スキーマパーサー
-|   |-- codegen/         # コードジェネレーター (Rust/TypeScript)
+|   |-- codegen/         # コードジェネレーター（Rust/TypeScript）
 |   +-- packet/          # UnisonPacket (rkyv + zstd)
 |
-|-- ネットワーク層
+|-- Network Layer
 |   |-- quic/            # QUIC トランスポート + Typed Frame I/O
-|   |-- client/          # ProtocolClient (open_channel → UnisonChannel)
+|   |-- client/          # ProtocolClient (open_channel -> UnisonChannel)
 |   |-- server/          # ProtocolServer (register_channel, spawn_listen)
 |   |-- channel/         # UnisonChannel (Request/Response + Event + Raw)
 |   |-- identity/        # Identity Handshake (ServerIdentity, ChannelInfo)
-|   |-- context/         # ConnectionContext (接続状態管理)
-|   +-- service/         # サービス抽象化層
+|   +-- context/         # ConnectionContext（接続状態管理）
 |
-+-- コンテキスト層 (CGP)
-    |-- adapter/         # 既存システム統合
-    +-- handlers/        # 拡張可能ハンドラー
++-- 依存ライブラリ
+    |-- cgp              # Context-Generic Programming（拡張基盤）
+    +-- unison-kdl       # Unison スキーマ用 KDL 拡張
 ```
 
-### コアコンポーネント
+> **CGP について**: [Context-Generic Programming](https://crates.io/crates/cgp) (`cgp`, `cgp-component`) は、将来的なトレイトベースのコンポーネントアーキテクチャ構築のためにワークスペース依存に含まれている。現時点ではアプリケーションコードで積極的には使用されていない。
 
-#### UnisonChannel -- 統合チャネル型
+### 主要コンポーネント
 
-QUIC ストリーム上で動作する統合チャネル。Request/Response、Event push、Raw bytes の3パターンをサポートする。内部に recv ループを持ち、type tag で受信フレームを自動振り分けする。
+#### UnisonChannel — 統一チャネル型
+
+QUIC ストリーム上で動作する統一チャネル。Request/Response、Event push、Raw bytes の3パターンをサポート。内部に recv ループを持ち、受信フレームを type tag で自動振り分けする。
 
 ```rust
 impl UnisonChannel {
@@ -227,7 +275,7 @@ impl UnisonChannel {
     pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError>;
     pub async fn recv(&self) -> Result<ProtocolMessage, NetworkError>;
 
-    // Raw bytes（シリアライズをバイパス）
+    // Raw bytes（シリアライゼーションをバイパス）
     pub async fn send_raw(&self, data: &[u8]) -> Result<(), NetworkError>;
     pub async fn recv_raw(&self) -> Result<Vec<u8>, NetworkError>;
 
@@ -235,11 +283,11 @@ impl UnisonChannel {
 }
 ```
 
-#### ServerHandle -- サーバーライフサイクル管理
+#### ServerHandle — サーバーライフサイクル管理
 
 ```rust
 let server = ProtocolServer::new();
-// チャネルハンドラー登録...
+// チャネルハンドラーの登録...
 
 // バックグラウンドで起動
 let handle = server.spawn_listen("[::1]:8080").await?;
@@ -252,12 +300,14 @@ println!("終了済み: {}", handle.is_finished());
 handle.shutdown().await?;
 ```
 
-#### ConnectionEvent -- 接続イベント通知
+#### ConnectionEvent — 接続イベント通知
 
 ```rust
-let mut events = server.subscribe_connection_events().await;
+// subscribe_connection_events() は非同期ではない — broadcast::Receiver を直接返す
+let mut events = server.subscribe_connection_events();
 tokio::spawn(async move {
-    while let Some(event) = events.recv().await {
+    // broadcast::Receiver::recv() は Result を返す（Option ではない）
+    while let Ok(event) = events.recv().await {
         match event {
             ConnectionEvent::Connected { remote_addr, context } => {
                 println!("接続: {}", remote_addr);
@@ -270,7 +320,7 @@ tokio::spawn(async move {
 });
 ```
 
-#### UnisonPacket -- ゼロコピーパケット型
+#### UnisonPacket — ゼロコピーパケット型
 
 ```rust
 use unison::packet::{UnisonPacket, StringPayload};
@@ -281,7 +331,7 @@ let packet = UnisonPacket::builder()
     .with_sequence(1)
     .build(payload)?;
 
-// Bytes に変換（2KB 以上は自動 zstd 圧縮）
+// Bytes に変換（2KB 以上のペイロードは自動 zstd 圧縮）
 let bytes = packet.to_bytes();
 
 // Bytes から復元（ゼロコピーデシリアライゼーション）
@@ -297,7 +347,7 @@ RUSTFLAGS="-C symbol-mangling-version=v0" cargo test --tests --workspace -- --sk
 # clippy
 cargo clippy --lib --workspace -- -D warnings
 
-# 統合テストのみ
+# インテグレーションテストのみ
 cargo test --test quic_integration_test
 
 # 詳細ログ付き
@@ -308,24 +358,24 @@ RUST_LOG=debug cargo test -- --nocapture
 
 - [API リファレンス](https://docs.rs/unison)
 - **仕様書** (spec/)
-  - [コアコンセプト](spec/01-core-concept/SPEC.md) -- Everything is a Channel、3 層アーキテクチャ
-  - [Unified Channel プロトコル](spec/02-protocol-rpc/SPEC.md) -- KDL スキーマ、request/event 構文、コード生成
-  - [Stream Channel](spec/03-stream-channels/SPEC.md) -- UnisonChannel、チャネル型仕様
-- **設計ドキュメント** (design/)
+  - [コアコンセプト](spec/01-core-concept/SPEC.md) — Everything is a Channel、3層アーキテクチャ
+  - [Unified Channel Protocol](spec/02-protocol-rpc/SPEC.md) — KDL スキーマ、request/event 構文、コード生成
+  - [Stream Channel](spec/03-stream-channels/SPEC.md) — UnisonChannel、チャネル型仕様
+- **設計書** (design/)
   - [アーキテクチャ設計](design/architecture.md)
   - [パケット実装仕様](design/packet.md)
-  - [QUIC ランタイム設計](design/quic-runtime.md) -- Stream-First API の QUIC ランタイム実装
+  - [QUIC ランタイム設計](design/quic-runtime.md) — Stream-First API QUIC ランタイム実装
 - **実装ガイド** (guides/)
   - [Quinn API ガイド](guides/quinn-stream-api.md)
-  - [チャネルガイド](guides/channel-guide.md) -- Unified Channel の実践ガイド
+  - [チャネルガイド](guides/channel-guide.md) — Unified Channel の実践ガイド
 
 ## 開発
 
 ### ビルド要件
 
-- Rust 1.93 以上（MSRV）
-- Rust 2024 エディション
-- Tokio 1.40 以上
+- Rust 1.93+ (MSRV)
+- Rust 2024 edition
+- Tokio 1.40+
 
 ### 開発環境のセットアップ
 
@@ -334,11 +384,11 @@ git clone https://github.com/chronista-club/unison
 cd unison
 cargo build
 
-# テストの実行
+# テスト実行
 RUSTFLAGS="-C symbol-mangling-version=v0" cargo test --tests --workspace -- --skip packet
 ```
 
-> **macOS 開発者向けの注意**: macOS の標準リンカーには制限があるため、テストを実行するには `lld` リンカーが必要な場合がある。`brew install lld` でインストール後、`.cargo/config.toml` に以下を追加:
+> **macOS 開発者への注意**: macOS のデフォルトリンカーには制限があるため、テスト実行に `lld` リンカーが必要な場合がある。`brew install lld` でインストール後、`.cargo/config.toml` に以下を追加:
 >
 > ```toml
 > [target.aarch64-apple-darwin]
@@ -356,9 +406,11 @@ MIT License - 詳細は [LICENSE](LICENSE) ファイルを参照。
 - [KDL](https://kdl.dev/) - 設定言語
 - [Tokio](https://tokio.rs/) - 非同期ランタイム
 - [rkyv](https://github.com/rkyv/rkyv) - ゼロコピーシリアライゼーション
+- [CGP](https://github.com/informalsystems/cgp) - Context-Generic Programming
+- [Claude Agent SDK](https://crates.io/crates/claude-agent-sdk) - AI エージェント統合
 
 ---
 
-**Unison Protocol** - _言語とプラットフォームを越えた通信の調和_
+**Unison Protocol** - _言語とプラットフォームを超えた通信の調和_
 
 [GitHub](https://github.com/chronista-club/unison) | [Crates.io](https://crates.io/crates/unison)
