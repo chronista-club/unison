@@ -1,11 +1,10 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{Level, info};
 use tracing_subscriber;
-use unison::network::{MessageType, UnisonServer};
+use unison::network::MessageType;
 use unison::network::channel::UnisonChannel;
 use unison::{ProtocolServer, UnisonProtocol};
 
@@ -23,28 +22,20 @@ async fn main() -> Result<()> {
     protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
 
     // Create server
-    let mut server = protocol.create_server();
+    let server = protocol.create_server();
     let start_time = Instant::now();
 
     // Register channel handlers
     register_channel_handlers(&server, start_time).await;
 
     info!("Unison Protocol Server Started!");
-    info!("Listening on: quic://127.0.0.1:8080 (QUIC Transport)");
+    info!("Listening on: quic://[::1]:8080 (QUIC Transport)");
     info!("Run client with: cargo run --example unison_ping_client");
     info!("Available methods: ping, echo, get_server_time");
     info!("Press Ctrl+C to stop");
 
-    // Start the server
-    server.listen("127.0.0.1:8080").await?;
-
-    // Keep the server running
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        if !server.is_running() {
-            break;
-        }
-    }
+    // Start the server (blocks until shutdown)
+    server.listen("[::1]:8080").await?;
 
     Ok(())
 }

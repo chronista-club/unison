@@ -27,7 +27,7 @@ pub struct ChannelInfo {
 }
 
 /// チャネルの方向
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelDirection {
     ServerToClient,
