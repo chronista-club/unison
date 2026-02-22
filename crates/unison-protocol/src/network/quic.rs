@@ -13,8 +13,8 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{error, info, warn};
 
 use super::{
-    MessageType, NetworkError, ProtocolFrame, ProtocolMessage, StreamHandle,
-    SystemStream, context::ConnectionContext, server::ProtocolServer,
+    MessageType, NetworkError, ProtocolFrame, ProtocolMessage, StreamHandle, SystemStream,
+    context::ConnectionContext, server::ProtocolServer,
 };
 
 /// Default certificate file paths for assets/certs directory
@@ -322,7 +322,16 @@ impl QuicClient {
 
         info!("Connected to QUIC server at {} (IPv6)", addr);
 
+        // accept_bi ループ用に connection をクローン
+        let connection_for_loop = connection.clone();
         *self.connection.write().await = Some(connection);
+
+        // サーバー発信ストリームを受け付けるバックグラウンドタスクを起動
+        let tx = self.tx.clone();
+        let task = tokio::spawn(async move {
+            client_accept_bi_loop(connection_for_loop, tx).await;
+        });
+        self.response_tasks.lock().await.push(task);
 
         Ok(())
     }
@@ -633,6 +642,49 @@ impl QuicServer {
         }
 
         Ok(())
+    }
+}
+
+/// クライアント側: サーバー発信の双方向ストリームを受け付けるループ
+///
+/// サーバーが `connection.open_bi()` で開いたストリーム（Identity 送信等）を
+/// `accept_bi()` で受信し、ProtocolMessage に変換して tx チャネルに送る。
+async fn client_accept_bi_loop(
+    connection: Connection,
+    tx: mpsc::UnboundedSender<ProtocolMessage>,
+) {
+    loop {
+        match connection.accept_bi().await {
+            Ok((_send_stream, mut recv_stream)) => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
+                        Ok(data) if !data.is_empty() => {
+                            let frame_bytes = bytes::Bytes::from(data);
+                            if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes)
+                                && let Ok(message) = ProtocolMessage::from_frame(&frame)
+                            {
+                                let _ = tx.send(message);
+                            }
+                        }
+                        Ok(_) => {
+                            // 空データ — 無視
+                        }
+                        Err(e) => {
+                            warn!("Failed to read server-initiated stream: {}", e);
+                        }
+                    }
+                });
+            }
+            Err(quinn::ConnectionError::ApplicationClosed(_)) => {
+                info!("Connection closed by server");
+                break;
+            }
+            Err(e) => {
+                warn!("Failed to accept server-initiated stream: {}", e);
+                break;
+            }
+        }
     }
 }
 
@@ -990,12 +1042,10 @@ impl UnisonStream {
 
         let mut recv_guard = self.recv_stream.lock().await;
         if let Some(recv_stream) = recv_guard.as_mut() {
-            let (frame_type, payload) = read_typed_frame(recv_stream)
-                .await
-                .map_err(|e| {
-                    self.is_active.store(false, Ordering::SeqCst);
-                    NetworkError::Quic(format!("Failed to read frame: {}", e))
-                })?;
+            let (frame_type, payload) = read_typed_frame(recv_stream).await.map_err(|e| {
+                self.is_active.store(false, Ordering::SeqCst);
+                NetworkError::Quic(format!("Failed to read frame: {}", e))
+            })?;
 
             match frame_type {
                 FRAME_TYPE_PROTOCOL => {
