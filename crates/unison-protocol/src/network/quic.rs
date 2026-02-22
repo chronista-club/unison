@@ -116,8 +116,7 @@ struct EmbeddedCerts;
 
 /// QUIC client implementation
 pub struct QuicClient {
-    #[allow(dead_code)]
-    endpoint: Option<Endpoint>,
+    endpoint: Mutex<Option<Endpoint>>,
     connection: Arc<RwLock<Option<Connection>>>,
     rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<ProtocolMessage>>>>,
     tx: mpsc::UnboundedSender<ProtocolMessage>,
@@ -129,7 +128,7 @@ impl QuicClient {
     pub fn new() -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         Ok(Self {
-            endpoint: None,
+            endpoint: Mutex::new(None),
             connection: Arc::new(RwLock::new(None)),
             rx: Arc::new(RwLock::new(Some(rx))),
             tx,
@@ -322,6 +321,9 @@ impl QuicClient {
 
         info!("Connected to QUIC server at {} (IPv6)", addr);
 
+        // Endpoint を保存（drop されると UDP ソケットが閉じて接続が切れる）
+        *self.endpoint.lock().await = Some(endpoint);
+
         // accept_bi ループ用に connection をクローン
         let connection_for_loop = connection.clone();
         *self.connection.write().await = Some(connection);
@@ -348,6 +350,10 @@ impl QuicClient {
         if let Some(connection) = connection_guard.take() {
             connection.close(quinn::VarInt::from_u32(0), b"client disconnect");
         }
+
+        // Endpoint をクリーンアップ
+        self.endpoint.lock().await.take();
+
         Ok(())
     }
 
