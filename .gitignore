@@ -56,3 +56,6 @@ assets/certs/*.der
 # Serena MCP server cache
 .serena/
 .vantage/
+
+# Git worktrees
+.worktrees/
