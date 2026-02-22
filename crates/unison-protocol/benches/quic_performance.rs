@@ -2,7 +2,6 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use hdrhistogram::Histogram;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Barrier;
