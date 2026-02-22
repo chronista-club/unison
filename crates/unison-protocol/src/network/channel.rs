@@ -148,12 +148,19 @@ impl UnisonChannel {
         self.stream.send_frame(&msg).await?;
 
         // Response を待つ（タイムアウト付き）
-        let response = tokio::time::timeout(self.request_timeout, rx)
-            .await
-            .map_err(|_| NetworkError::Timeout)?
-            .map_err(|_| {
-                NetworkError::Protocol("Request cancelled: channel closed".to_string())
-            })?;
+        let response = match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                return Err(NetworkError::Protocol(
+                    "Request cancelled: channel closed".to_string(),
+                ));
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(NetworkError::Timeout);
+            }
+        };
 
         match response.msg_type {
             MessageType::Error => {

@@ -123,7 +123,7 @@ fn bench_streaming_throughput(c: &mut Criterion) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
                 let quic_client = QuicClient::new().unwrap();
-                let mut client = ProtocolClient::new(quic_client);
+                let client = ProtocolClient::new(quic_client);
                 client.connect("[::1]:8082").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();
@@ -233,7 +233,7 @@ fn bench_burst_throughput(c: &mut Criterion) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
                 let quic_client = QuicClient::new().unwrap();
-                let mut client = ProtocolClient::new(quic_client);
+                let client = ProtocolClient::new(quic_client);
                 client.connect("[::1]:8084").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();

@@ -273,13 +273,13 @@ impl RustGenerator {
                 #(#streams)*
             }
 
-            // クライアント実装
+            // クライアント実装（レガシー service 構文互換）
             pub struct #client_name {
-                inner: Box<dyn ProtocolClient>,
+                inner: ProtocolClient,
             }
 
             impl #client_name {
-                pub fn new(client: Box<dyn ProtocolClient>) -> Self {
+                pub fn new(client: ProtocolClient) -> Self {
                     Self { inner: client }
                 }
 

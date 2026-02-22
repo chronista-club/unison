@@ -171,7 +171,7 @@ fn bench_connection_establishment(c: &mut Criterion) {
 
             let start = std::time::Instant::now();
             let quic_client = QuicClient::new().unwrap();
-            let mut client = ProtocolClient::new(quic_client);
+            let client = ProtocolClient::new(quic_client);
             client.connect("[::1]:8080").await.unwrap();
             let elapsed = start.elapsed();
 
