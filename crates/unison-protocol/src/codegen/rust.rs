@@ -1,8 +1,7 @@
 use super::CodeGenerator;
 use crate::parser::{
-    Channel, ChannelEvent, ChannelMessage, ChannelRequest,
-    DefaultValue, Enum, Field, FieldType, Message, Method, MethodMessage, ParsedSchema, Protocol,
-    Service, Stream, TypeRegistry,
+    Channel, ChannelEvent, ChannelMessage, ChannelRequest, DefaultValue, Enum, Field, FieldType,
+    Message, Method, MethodMessage, ParsedSchema, Protocol, Service, Stream, TypeRegistry,
 };
 use anyhow::Result;
 use convert_case::{Case, Casing};

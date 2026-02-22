@@ -124,11 +124,7 @@ impl UnisonChannel {
     ///
     /// メッセージ ID を自動生成し、pending マップに登録。
     /// Response が返るまで await する。
-    pub async fn request(
-        &self,
-        method: &str,
-        payload: Value,
-    ) -> Result<Value, NetworkError> {
+    pub async fn request(&self, method: &str, payload: Value) -> Result<Value, NetworkError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
@@ -139,12 +135,8 @@ impl UnisonChannel {
         }
 
         // Request メッセージを直接フレームとして送信
-        let msg = ProtocolMessage::new_with_json(
-            id,
-            method.to_string(),
-            MessageType::Request,
-            payload,
-        )?;
+        let msg =
+            ProtocolMessage::new_with_json(id, method.to_string(), MessageType::Request, payload)?;
         self.stream.send_frame(&msg).await?;
 
         // Response を待つ（タイムアウト付き）
@@ -175,17 +167,9 @@ impl UnisonChannel {
     }
 
     /// 一方向 Event 送信（応答不要）
-    pub async fn send_event(
-        &self,
-        method: &str,
-        payload: Value,
-    ) -> Result<(), NetworkError> {
-        let msg = ProtocolMessage::new_with_json(
-            0,
-            method.to_string(),
-            MessageType::Event,
-            payload,
-        )?;
+    pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError> {
+        let msg =
+            ProtocolMessage::new_with_json(0, method.to_string(), MessageType::Event, payload)?;
         self.stream.send_frame(&msg).await
     }
 
@@ -220,17 +204,17 @@ impl UnisonChannel {
     /// recv ループが type tag 0x01 のフレームを受信すると raw_rx に流す。
     pub async fn recv_raw(&self) -> Result<Vec<u8>, NetworkError> {
         let mut rx = self.raw_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            NetworkError::Protocol("Raw channel closed".to_string())
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| NetworkError::Protocol("Raw channel closed".to_string()))
     }
 
     /// Event 受信（サーバーからのプッシュ、または非 Response メッセージ）
     pub async fn recv(&self) -> Result<ProtocolMessage, NetworkError> {
         let mut rx = self.event_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            NetworkError::Protocol("Channel closed".to_string())
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| NetworkError::Protocol("Channel closed".to_string()))
     }
 
     /// チャネルを閉じる

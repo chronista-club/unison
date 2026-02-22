@@ -124,4 +124,3 @@ pub struct ProtocolError {
     pub message: String,
     pub details: Option<serde_json::Value>,
 }
-

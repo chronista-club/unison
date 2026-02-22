@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
 use tracing::{Level, info};
-use unison::network::channel::UnisonChannel;
 use unison::network::MessageType;
+use unison::network::channel::UnisonChannel;
 use unison::network::quic::QuicClient;
 use unison::{ProtocolClient, ProtocolServer};
 

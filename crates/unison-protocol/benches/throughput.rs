@@ -33,7 +33,11 @@ async fn register_echo_channel(server: &ProtocolServer, counter: Arc<AtomicU64>)
                             "status": "processed",
                             "id": payload.get("id").cloned().unwrap_or(json!(0))
                         });
-                        if channel.send_response(msg.id, &msg.method, response).await.is_err() {
+                        if channel
+                            .send_response(msg.id, &msg.method, response)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

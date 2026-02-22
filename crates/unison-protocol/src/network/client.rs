@@ -45,10 +45,7 @@ impl ProtocolClient {
     ///
     /// `__channel:{name}` メソッドで新しいQUICストリームを開き、
     /// `UnisonChannel` でラップして返す。
-    pub async fn open_channel(
-        &self,
-        channel_name: &str,
-    ) -> Result<UnisonChannel, NetworkError> {
+    pub async fn open_channel(&self, channel_name: &str) -> Result<UnisonChannel, NetworkError> {
         let connection_guard = self.transport.connection().read().await;
         let connection = connection_guard
             .as_ref()

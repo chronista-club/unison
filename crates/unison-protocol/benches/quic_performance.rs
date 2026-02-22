@@ -28,7 +28,9 @@ async fn measure_latency(
 
         let start = std::time::Instant::now();
         let _ = channel.request("echo", message).await;
-        histogram.record(start.elapsed().as_micros() as u64).unwrap();
+        histogram
+            .record(start.elapsed().as_micros() as u64)
+            .unwrap();
     }
 
     histogram

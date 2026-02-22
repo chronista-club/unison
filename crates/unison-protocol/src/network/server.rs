@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
 use super::NetworkError;
+use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
 
 /// 接続イベント通知
 #[derive(Debug, Clone)]
@@ -150,9 +150,7 @@ impl ProtocolServer {
     ///
     /// 接続/切断時に `ConnectionEvent` を受信できる。
     /// 複数のサブスクライバが同時に購読可能。
-    pub fn subscribe_connection_events(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<ConnectionEvent> {
+    pub fn subscribe_connection_events(&self) -> tokio::sync::broadcast::Receiver<ConnectionEvent> {
         self.connection_event_tx.subscribe()
     }
 

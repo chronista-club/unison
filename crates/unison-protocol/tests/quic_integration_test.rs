@@ -3,8 +3,8 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::{Level, info};
-use unison::network::channel::UnisonChannel;
 use unison::network::MessageType;
+use unison::network::channel::UnisonChannel;
 use unison::{ProtocolServer, UnisonProtocol};
 
 /// QUIC統合テスト - サーバーとクライアントを同一プロセスでテスト

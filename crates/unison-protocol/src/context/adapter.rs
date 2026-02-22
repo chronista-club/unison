@@ -8,8 +8,8 @@ use tokio::sync::RwLock;
 use super::{
     CgpProtocolContext, Handler, HandlerRegistry, MessageHandler, ServiceRegistry, TransportLayer,
 };
-use crate::network::{MessageType, NetworkError, ProtocolClient, ProtocolMessage, ProtocolServer};
 use crate::network::quic::{FRAME_TYPE_PROTOCOL, write_typed_frame};
+use crate::network::{MessageType, NetworkError, ProtocolClient, ProtocolMessage, ProtocolServer};
 
 // ========================================
 // Transport Adapter

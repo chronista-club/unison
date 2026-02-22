@@ -12,8 +12,8 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{error, info, warn};
 
 use super::{
-    NetworkError, ProtocolFrame, ProtocolMessage,
-    context::ConnectionContext, server::ProtocolServer,
+    NetworkError, ProtocolFrame, ProtocolMessage, context::ConnectionContext,
+    server::ProtocolServer,
 };
 
 /// Default certificate file paths for assets/certs directory
@@ -559,10 +559,7 @@ impl QuicServer {
 ///
 /// サーバーが `connection.open_bi()` で開いたストリーム（Identity 送信等）を
 /// `accept_bi()` で受信し、ProtocolMessage に変換して tx チャネルに送る。
-async fn client_accept_bi_loop(
-    connection: Connection,
-    tx: mpsc::UnboundedSender<ProtocolMessage>,
-) {
+async fn client_accept_bi_loop(connection: Connection, tx: mpsc::UnboundedSender<ProtocolMessage>) {
     loop {
         match connection.accept_bi().await {
             Ok((_send_stream, mut recv_stream)) => {
@@ -964,4 +961,3 @@ impl UnisonStream {
         }
     }
 }
-

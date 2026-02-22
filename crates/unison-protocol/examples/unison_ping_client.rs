@@ -42,9 +42,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_channel_tests(
-    channel: &unison::network::channel::UnisonChannel,
-) -> Result<()> {
+async fn run_channel_tests(channel: &unison::network::channel::UnisonChannel) -> Result<()> {
     info!("");
     info!("Starting Unison Protocol Tests");
     info!("===================================");
@@ -100,7 +98,11 @@ async fn run_channel_tests(
     info!("----------------------------------");
 
     let test_cases = [
-        ("uppercase", "Hello Unison Protocol!", "Transform to uppercase"),
+        (
+            "uppercase",
+            "Hello Unison Protocol!",
+            "Transform to uppercase",
+        ),
         ("reverse", "protocol", "Reverse the string"),
         ("", "No transformation", "Echo as-is"),
     ];
