@@ -4,7 +4,6 @@ use serde_json::json;
 use std::time::Instant;
 use tracing::{Level, info};
 use tracing_subscriber;
-use unison::network::UnisonClient;
 use unison::{ProtocolClient, UnisonProtocol};
 
 #[tokio::main]
@@ -13,7 +12,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     info!("Unison Protocol Ping Client Starting");
-    info!("Connecting to 127.0.0.1:8080 via QUIC...");
+    info!("Connecting to [::1]:8080 via QUIC...");
 
     // Create Unison protocol instance
     let mut protocol = UnisonProtocol::new();
@@ -22,10 +21,10 @@ async fn main() -> Result<()> {
     protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
 
     // Create client
-    let mut client = protocol.create_client()?;
+    let client = protocol.create_client()?;
 
     // Connect to server (QUIC uses IP:Port format)
-    client.connect("127.0.0.1:8080").await?;
+    client.connect("[::1]:8080").await?;
     info!("Connected to Unison Protocol server!");
 
     // Open the "ping" channel
@@ -43,9 +42,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_channel_tests(
-    channel: &unison::network::channel::UnisonChannel,
-) -> Result<()> {
+async fn run_channel_tests(channel: &unison::network::channel::UnisonChannel) -> Result<()> {
     info!("");
     info!("Starting Unison Protocol Tests");
     info!("===================================");
@@ -101,7 +98,11 @@ async fn run_channel_tests(
     info!("----------------------------------");
 
     let test_cases = [
-        ("uppercase", "Hello Unison Protocol!", "Transform to uppercase"),
+        (
+            "uppercase",
+            "Hello Unison Protocol!",
+            "Transform to uppercase",
+        ),
         ("reverse", "protocol", "Reverse the string"),
         ("", "No transformation", "Echo as-is"),
     ];

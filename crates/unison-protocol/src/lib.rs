@@ -25,18 +25,17 @@
 //!
 //! // サーバーを作成し、チャネルハンドラーを登録
 //! let server = protocol.create_server();
-//! // server.register_channel("query", |ctx, stream| async { Ok(()) }).await;
-//! // server.listen("127.0.0.1:8080").await?;
+//! // server.register_channel("ping", |ctx, stream| async { Ok(()) }).await;
+//! // server.listen("[::1]:8080").await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! ## コア概念
 //!
-//! - **Protocol**: サービス、メッセージ、型を定義するトップレベルコンテナ
-//! - **Service**: リクエスト/レスポンス定義を持つRPCメソッドの集合
+//! - **Protocol**: チャネル、メッセージ、型を定義するトップレベルコンテナ
+//! - **Channel**: Request/Response + Event push をサポートする双方向通信路
 //! - **Message**: 型付きフィールドを持つ構造化データ型
-//! - **Method**: サービス内の個別RPCエンドポイント
 //!
 //! ## 生成コード
 //!
@@ -72,7 +71,6 @@ use parser::{ParseError as UnisonParseError, ParsedSchema, SchemaParser};
 // よく使用されるトレイトとクライアント/サーバーの再エクスポート
 pub use network::{
     ConnectionEvent, NetworkError, ProtocolClient, ProtocolServer, ServerHandle, UnisonChannel,
-    UnisonClient, UnisonServer,
 };
 
 /// Unison Protocolのメインエントリポイント
@@ -153,7 +151,32 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_schema() {
+    fn test_parse_channel_schema() {
+        let schema = r#"
+protocol "test" version="1.0.0" {
+    channel "ping" from="client" lifetime="persistent" {
+        request "Ping" {
+            field "message" type="string"
+            returns "PingResponse" {
+                field "reply" type="string"
+            }
+        }
+    }
+}
+        "#;
+
+        let mut protocol = UnisonProtocol::new();
+        let result = protocol.load_schema(schema);
+        if let Err(e) = &result {
+            eprintln!("パースエラー: {:?}", e);
+        }
+        assert!(result.is_ok());
+        assert_eq!(protocol.schemas.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_legacy_service_schema() {
+        // 後方互換: パーサーは旧 service 構文もまだ受け付ける
         let schema = r#"
 protocol "test" version="1.0.0" {
     service "TestService" {
@@ -175,7 +198,6 @@ protocol "test" version="1.0.0" {
             eprintln!("パースエラー: {:?}", e);
         }
         assert!(result.is_ok());
-        assert_eq!(protocol.schemas.len(), 1);
     }
 
     #[test]

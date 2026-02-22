@@ -36,7 +36,7 @@ impl UnisonTools {
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The server URL to connect to (e.g., 'https://[::1]:8080')"
+                        "description": "The server URL to connect to (e.g., '[::1]:8080')"
                     }
                 },
                 "required": ["url"]
@@ -52,7 +52,7 @@ impl UnisonTools {
 
                     info!("Connecting to Unison server: {}", url);
 
-                    // TODO: 実際の接続処理
+                    // TODO: 実際の接続処理（チャネル経由）
                     // let mut client = ProtocolClient::new_default()?;
                     // client.connect(url).await?;
 
@@ -64,33 +64,33 @@ impl UnisonTools {
             },
         );
 
-        // Tool 2: Unisonサービスを呼び出し
+        // Tool 2: チャネル経由でリクエストを送信
         let call_tool = SdkMcpTool::new(
             "unison_call",
-            "Call a method on a Unison service",
+            "Send a request through a Unison channel",
             json!({
                 "type": "object",
                 "properties": {
-                    "service": {
+                    "channel": {
                         "type": "string",
-                        "description": "The name of the service to call"
+                        "description": "The name of the channel to use"
                     },
                     "method": {
                         "type": "string",
-                        "description": "The method name to invoke"
+                        "description": "The request method name"
                     },
                     "payload": {
                         "type": "object",
                         "description": "The request payload as JSON"
                     }
                 },
-                "required": ["service", "method"]
+                "required": ["channel", "method"]
             }),
             |args: Value| {
                 Box::pin(async move {
-                    let service = args["service"]
+                    let channel = args["channel"]
                         .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("Missing 'service' parameter"))
+                        .ok_or_else(|| anyhow::anyhow!("Missing 'channel' parameter"))
                         .map_err(|e| {
                             claude_agent_sdk::error::ClaudeError::Connection(e.to_string())
                         })?;
@@ -103,38 +103,39 @@ impl UnisonTools {
                     let payload = args.get("payload").cloned().unwrap_or(json!({}));
 
                     info!(
-                        "Calling Unison service: {}::{} with payload: {}",
-                        service, method, payload
+                        "Calling Unison channel: {}::{} with payload: {}",
+                        channel, method, payload
                     );
 
-                    // TODO: 実際のサービス呼び出し
-                    // let response = client.call_service(service, method, payload).await?;
+                    // TODO: チャネル経由のリクエスト送信
+                    // let ch = client.open_channel(channel).await?;
+                    // let response = ch.request(method, payload).await?;
 
                     Ok(ToolResult::text(format!(
-                        "Called {}::{} (mock response - actual implementation needed)",
-                        service, method
+                        "Called {}::{} (mock response - channel implementation needed)",
+                        channel, method
                     )))
                 })
             },
         );
 
-        // Tool 3: 接続中のサービス一覧を取得
+        // Tool 3: 利用可能なチャネル一覧を取得
         let list_tool = SdkMcpTool::new(
-            "unison_list_services",
-            "List available services on the connected Unison server",
+            "unison_list_channels",
+            "List available channels on the connected Unison server",
             json!({
                 "type": "object",
                 "properties": {}
             }),
             |_args: Value| {
                 Box::pin(async move {
-                    info!("Listing Unison services");
+                    info!("Listing Unison channels");
 
-                    // TODO: 実際のサービス一覧取得
-                    // let services = client.list_services().await;
+                    // TODO: Identity からチャネル一覧を取得
+                    // let identity = client.server_identity().await;
 
                     Ok(ToolResult::text(
-                        "Available services: ExampleService, AnotherService (mock list)",
+                        "Available channels: (mock list - channel implementation needed)",
                     ))
                 })
             },
@@ -171,7 +172,7 @@ impl UnisonTools {
     pub async fn connect(&mut self, url: &str) -> Result<()> {
         info!("Connecting to Unison server: {}", url);
 
-        let mut client = ProtocolClient::new_default()
+        let client = ProtocolClient::new_default()
             .map_err(|e| AgentError::Communication(format!("Failed to create client: {}", e)))?;
 
         client
@@ -185,42 +186,37 @@ impl UnisonTools {
         Ok(())
     }
 
-    /// サービスを呼び出し
-    pub async fn call_service(
-        &mut self,
-        service: &str,
+    /// チャネル経由でリクエストを送信
+    pub async fn send_request(
+        &self,
+        channel_name: &str,
         method: &str,
         payload: Value,
     ) -> Result<Value> {
         let client = self
             .client
-            .as_mut()
-            .ok_or_else(|| AgentError::Communication("Not connected to server".to_string()))?;
-
-        debug!(
-            "Calling service: {}::{} with payload: {}",
-            service, method, payload
-        );
-
-        client
-            .call_service(service, method, payload)
-            .await
-            .map_err(|e| AgentError::Communication(format!("Service call failed: {}", e)))
-    }
-
-    /// 利用可能なサービス一覧を取得
-    pub async fn list_services(&self) -> Result<Vec<String>> {
-        let client = self
-            .client
             .as_ref()
             .ok_or_else(|| AgentError::Communication("Not connected to server".to_string()))?;
 
-        Ok(client.list_services().await)
+        debug!(
+            "Sending request via channel: {}::{} with payload: {}",
+            channel_name, method, payload
+        );
+
+        let channel = client
+            .open_channel(channel_name)
+            .await
+            .map_err(|e| AgentError::Communication(format!("Failed to open channel: {}", e)))?;
+
+        channel
+            .request(method, payload)
+            .await
+            .map_err(|e| AgentError::Communication(format!("Channel request failed: {}", e)))
     }
 
     /// サーバーから切断
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(mut client) = self.client.take() {
+        if let Some(client) = self.client.take() {
             client
                 .disconnect()
                 .await

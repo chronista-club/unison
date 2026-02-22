@@ -9,11 +9,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::quic::{TypedFrame, UnisonStream};
 use super::{MessageType, NetworkError, ProtocolMessage};
+
+/// デフォルトの request タイムアウト（30秒）
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 統合チャネル型 — Request/Response、Event、Raw bytes をサポート
 ///
@@ -35,6 +39,8 @@ pub struct UnisonChannel {
     next_id: AtomicU64,
     /// バックグラウンド受信タスク
     recv_task: Mutex<Option<JoinHandle<()>>>,
+    /// request() のタイムアウト
+    request_timeout: Duration,
 }
 
 impl UnisonChannel {
@@ -104,18 +110,21 @@ impl UnisonChannel {
             raw_rx: Mutex::new(raw_rx),
             next_id: AtomicU64::new(1),
             recv_task: Mutex::new(Some(recv_task)),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
+    }
+
+    /// request タイムアウトを設定（ビルダーパターン）
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Request/Response パターン
     ///
     /// メッセージ ID を自動生成し、pending マップに登録。
     /// Response が返るまで await する。
-    pub async fn request(
-        &self,
-        method: &str,
-        payload: Value,
-    ) -> Result<Value, NetworkError> {
+    pub async fn request(&self, method: &str, payload: Value) -> Result<Value, NetworkError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
@@ -126,18 +135,24 @@ impl UnisonChannel {
         }
 
         // Request メッセージを直接フレームとして送信
-        let msg = ProtocolMessage::new_with_json(
-            id,
-            method.to_string(),
-            MessageType::Request,
-            payload,
-        )?;
+        let msg =
+            ProtocolMessage::new_with_json(id, method.to_string(), MessageType::Request, payload)?;
         self.stream.send_frame(&msg).await?;
 
-        // Response を待つ
-        let response = rx.await.map_err(|_| {
-            NetworkError::Protocol("Request cancelled: channel closed".to_string())
-        })?;
+        // Response を待つ（タイムアウト付き）
+        let response = match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                return Err(NetworkError::Protocol(
+                    "Request cancelled: channel closed".to_string(),
+                ));
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(NetworkError::Timeout);
+            }
+        };
 
         match response.msg_type {
             MessageType::Error => {
@@ -152,17 +167,9 @@ impl UnisonChannel {
     }
 
     /// 一方向 Event 送信（応答不要）
-    pub async fn send_event(
-        &self,
-        method: &str,
-        payload: Value,
-    ) -> Result<(), NetworkError> {
-        let msg = ProtocolMessage::new_with_json(
-            0,
-            method.to_string(),
-            MessageType::Event,
-            payload,
-        )?;
+    pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError> {
+        let msg =
+            ProtocolMessage::new_with_json(0, method.to_string(), MessageType::Event, payload)?;
         self.stream.send_frame(&msg).await
     }
 
@@ -197,17 +204,17 @@ impl UnisonChannel {
     /// recv ループが type tag 0x01 のフレームを受信すると raw_rx に流す。
     pub async fn recv_raw(&self) -> Result<Vec<u8>, NetworkError> {
         let mut rx = self.raw_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            NetworkError::Protocol("Raw channel closed".to_string())
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| NetworkError::Protocol("Raw channel closed".to_string()))
     }
 
     /// Event 受信（サーバーからのプッシュ、または非 Response メッセージ）
     pub async fn recv(&self) -> Result<ProtocolMessage, NetworkError> {
         let mut rx = self.event_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            NetworkError::Protocol("Channel closed".to_string())
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| NetworkError::Protocol("Channel closed".to_string()))
     }
 
     /// チャネルを閉じる

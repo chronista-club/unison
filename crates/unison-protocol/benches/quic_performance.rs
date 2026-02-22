@@ -2,12 +2,11 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use hdrhistogram::Histogram;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Barrier;
 use unison::network::channel::UnisonChannel;
-use unison::network::{MessageType, UnisonClient, UnisonServer, quic::QuicClient};
+use unison::network::{MessageType, quic::QuicClient};
 use unison::{ProtocolClient, ProtocolServer};
 
 /// メッセージサイズのバリエーション
@@ -29,7 +28,9 @@ async fn measure_latency(
 
         let start = std::time::Instant::now();
         let _ = channel.request("echo", message).await;
-        histogram.record(start.elapsed().as_micros() as u64).unwrap();
+        histogram
+            .record(start.elapsed().as_micros() as u64)
+            .unwrap();
     }
 
     histogram
@@ -64,7 +65,7 @@ async fn setup_server() -> Arc<Barrier> {
     let barrier_clone = barrier.clone();
 
     tokio::spawn(async move {
-        let mut server = ProtocolServer::new();
+        let server = ProtocolServer::new();
 
         // Echo チャネルハンドラー
         server
@@ -90,7 +91,7 @@ async fn setup_server() -> Arc<Barrier> {
             })
             .await;
 
-        let _ = server.listen("127.0.0.1:0").await;
+        let _ = server.listen("[::1]:0").await;
 
         barrier_clone.wait().await;
 
@@ -116,8 +117,8 @@ fn bench_latency(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async move {
                 let barrier = setup_server().await;
                 let quic_client = QuicClient::new().unwrap();
-                let mut client = ProtocolClient::new(quic_client);
-                client.connect("127.0.0.1:8080").await.unwrap();
+                let client = ProtocolClient::new(quic_client);
+                client.connect("[::1]:8080").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();
                 let histogram = measure_latency(&channel, size, 100).await;
@@ -145,8 +146,8 @@ fn bench_throughput(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async move {
                 let barrier = setup_server().await;
                 let quic_client = QuicClient::new().unwrap();
-                let mut client = ProtocolClient::new(quic_client);
-                client.connect("127.0.0.1:8080").await.unwrap();
+                let client = ProtocolClient::new(quic_client);
+                client.connect("[::1]:8080").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();
                 let throughput = measure_throughput(&channel, size, 5).await;
@@ -171,8 +172,8 @@ fn bench_connection_establishment(c: &mut Criterion) {
 
             let start = std::time::Instant::now();
             let quic_client = QuicClient::new().unwrap();
-            let mut client = ProtocolClient::new(quic_client);
-            client.connect("127.0.0.1:8080").await.unwrap();
+            let client = ProtocolClient::new(quic_client);
+            client.connect("[::1]:8080").await.unwrap();
             let elapsed = start.elapsed();
 
             client.disconnect().await.unwrap();
@@ -203,8 +204,8 @@ fn bench_concurrent_connections(c: &mut Criterion) {
                         let client_barrier_clone = client_barrier.clone();
                         let handle = tokio::spawn(async move {
                             let quic_client = QuicClient::new().unwrap();
-                            let mut client = ProtocolClient::new(quic_client);
-                            client.connect("127.0.0.1:8080").await.unwrap();
+                            let client = ProtocolClient::new(quic_client);
+                            client.connect("[::1]:8080").await.unwrap();
 
                             let channel = client.open_channel("bench").await.unwrap();
 

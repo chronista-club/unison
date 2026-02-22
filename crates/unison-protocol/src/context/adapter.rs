@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use super::{
     CgpProtocolContext, Handler, HandlerRegistry, MessageHandler, ServiceRegistry, TransportLayer,
 };
+use crate::network::quic::{FRAME_TYPE_PROTOCOL, write_typed_frame};
 use crate::network::{MessageType, NetworkError, ProtocolClient, ProtocolMessage, ProtocolServer};
 
 // ========================================
@@ -34,10 +35,26 @@ impl TransportLayer for QuicTransportAdapter {
     type Error = NetworkError;
 
     async fn send(&self, message: Self::Message) -> Result<(), Self::Error> {
-        self.client
-            .send(message)
+        let connection_guard = self.client.connection().read().await;
+        let connection = connection_guard
+            .as_ref()
+            .ok_or(NetworkError::NotConnected)?;
+
+        let (mut send_stream, _recv_stream) = connection
+            .open_bi()
             .await
-            .map_err(|e| NetworkError::Protocol(e.to_string()))
+            .map_err(|e| NetworkError::Quic(format!("Failed to open stream: {}", e)))?;
+
+        let frame = message
+            .into_frame()
+            .map_err(|e| NetworkError::Protocol(format!("Failed to create frame: {}", e)))?;
+        let frame_bytes = frame.to_bytes();
+
+        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes)
+            .await
+            .map_err(|e| NetworkError::Quic(format!("Failed to send: {}", e)))?;
+
+        Ok(())
     }
 
     async fn receive(&self) -> Result<Self::Message, Self::Error> {
@@ -78,10 +95,9 @@ impl TransportLayer for QuicTransportAdapter {
 // Service Registry Adapter
 // ========================================
 
-/// UnisonServiceをServiceRegistryトレイトに適合させるアダプター
+/// 汎用ServiceRegistryアダプター（Value ベース）
 pub struct ServiceRegistryAdapter {
-    services:
-        Arc<RwLock<std::collections::HashMap<String, Arc<crate::network::service::UnisonService>>>>,
+    services: Arc<RwLock<std::collections::HashMap<String, Value>>>,
 }
 
 impl Default for ServiceRegistryAdapter {
@@ -99,7 +115,7 @@ impl ServiceRegistryAdapter {
 }
 
 impl ServiceRegistry for ServiceRegistryAdapter {
-    type Service = Arc<crate::network::service::UnisonService>;
+    type Service = Value;
     type Error = NetworkError;
 
     async fn register(&self, name: String, service: Self::Service) -> Result<(), Self::Error> {
@@ -262,11 +278,7 @@ where
 // Helper Functions
 // ========================================
 
-fn generate_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::SeqCst)
-}
+use crate::network::generate_request_id as generate_id;
 
 // ========================================
 // Migration Utilities
@@ -280,7 +292,6 @@ impl MigrationHelper {
     pub async fn migrate_client(
         client: ProtocolClient,
     ) -> CgpEnhancedClient<QuicTransportAdapter, ServiceRegistryAdapter, HandlerRegistry> {
-        // QuicClientを抽出して新しいトランスポートアダプターを作成
         let transport = QuicTransportAdapter::new(crate::network::quic::QuicClient::new().unwrap());
         let registry = ServiceRegistryAdapter::new();
         let handler = HandlerRegistry::new();

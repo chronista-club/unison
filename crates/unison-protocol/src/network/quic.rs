@@ -8,13 +8,12 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{error, info, warn};
 
 use super::{
-    MessageType, NetworkError, ProtocolFrame, ProtocolMessage, StreamHandle, SystemStream,
-    context::ConnectionContext, server::ProtocolServer,
+    NetworkError, ProtocolFrame, ProtocolMessage, context::ConnectionContext,
+    server::ProtocolServer,
 };
 
 /// Default certificate file paths for assets/certs directory
@@ -23,6 +22,78 @@ pub const DEFAULT_KEY_PATH: &str = "assets/certs/private_key.der";
 
 /// Maximum message size for QUIC streams (8MB)
 const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
+
+/// Default port for QUIC connections
+const DEFAULT_PORT: u16 = 8080;
+
+/// IPv6アドレス文字列をSocketAddrに変換する共通関数
+///
+/// 対応形式:
+/// - `[::1]:8080` — 標準 IPv6+port
+/// - `::1` — IPv6 のみ（デフォルトポート付与）
+/// - `8080` — ポートのみ（IPv6 ループバック）
+/// - `localhost:8080` — ループバック
+fn parse_ipv6_address(addr: &str) -> Result<SocketAddr> {
+    // まず直接パースを試みる（IPv6のみ受け入れる）
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        match socket_addr {
+            SocketAddr::V6(_) => return Ok(socket_addr),
+            SocketAddr::V4(_) => {
+                return Err(anyhow::anyhow!(
+                    "IPv4アドレスはサポートされていません: {}",
+                    addr
+                ));
+            }
+        }
+    }
+
+    // IPv6アドレスとして解析を試みる（ポートなし）
+    if addr.contains(':') && !addr.contains('[') && !addr.contains('.') {
+        let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
+        if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
+            return Ok(socket_addr);
+        }
+    }
+
+    // ポート番号のみの場合はIPv6ループバックを使用
+    if let Ok(port) = addr.parse::<u16>() {
+        return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
+    }
+
+    // "localhost:port"形式の場合はIPv6ループバックを使用
+    if let Some(stripped) = addr.strip_prefix("localhost:")
+        && let Ok(port) = stripped.parse::<u16>()
+    {
+        return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
+    }
+
+    // [IPv6]:port 形式を解析
+    if addr.starts_with('[')
+        && let Some(end) = addr.find(']')
+    {
+        let ipv6_str = &addr[1..end];
+        let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
+            &addr[end + 2..]
+        } else {
+            return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
+        };
+
+        let ipv6 = ipv6_str
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
+        let port = if port_str.is_empty() {
+            DEFAULT_PORT
+        } else {
+            port_str
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
+        };
+
+        return Ok(SocketAddr::from((ipv6, port)));
+    }
+
+    Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr))
+}
 
 /// Length-prefixed フレームの読み取り（4バイトBE長 + データ）
 /// ストリームを消費せずに1フレームだけ読む
@@ -177,118 +248,7 @@ impl QuicClient {
 impl QuicClient {
     /// IPv6専用でサーバーアドレスを解析
     fn parse_server_address(addr: &str) -> Result<SocketAddr> {
-        // まず直接パースを試みる（IPv6のみ受け入れる）
-        if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
-            match socket_addr {
-                SocketAddr::V6(_) => return Ok(socket_addr),
-                SocketAddr::V4(_) => {
-                    return Err(anyhow::anyhow!(
-                        "IPv4アドレスはサポートされていません: {}",
-                        addr
-                    ));
-                }
-            }
-        }
-
-        // デフォルトポート
-        const DEFAULT_PORT: u16 = 8080;
-
-        // IPv6アドレスとして解析を試みる（ポートなし）
-        if addr.contains(':') && !addr.contains('[') && !addr.contains('.') {
-            // IPv6アドレスにデフォルトポートを追加
-            let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
-            if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
-                return Ok(socket_addr);
-            }
-        }
-
-        // ポート番号のみの場合はIPv6ループバックを使用
-        if let Ok(port) = addr.parse::<u16>() {
-            return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
-        }
-
-        // "localhost:port"形式の場合はIPv6ループバックを使用
-        if let Some(stripped) = addr.strip_prefix("localhost:")
-            && let Ok(port) = stripped.parse::<u16>()
-        {
-            return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
-        }
-
-        // [IPv6]:port 形式を解析
-        if addr.starts_with('[')
-            && let Some(end) = addr.find(']')
-        {
-            let ipv6_str = &addr[1..end];
-            let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
-                &addr[end + 2..]
-            } else {
-                return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
-            };
-
-            let ipv6 = ipv6_str
-                .parse::<std::net::Ipv6Addr>()
-                .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
-            let port = if port_str.is_empty() {
-                DEFAULT_PORT
-            } else {
-                port_str
-                    .parse::<u16>()
-                    .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
-            };
-
-            return Ok(SocketAddr::from((ipv6, port)));
-        }
-
-        // その他の場合はエラー
-        Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr))
-    }
-
-    pub async fn send(&self, message: ProtocolMessage) -> Result<()> {
-        let connection_guard = self.connection.read().await;
-        if let Some(connection) = connection_guard.as_ref() {
-            // 双方向ストリームを開く
-            let (mut send_stream, mut recv_stream) = connection
-                .open_bi()
-                .await
-                .context("Failed to open bidirectional QUIC stream")?;
-
-            // リクエストをフレームに変換して送信
-            let frame = message.into_frame().context("Failed to create frame")?;
-            let frame_bytes = frame.to_bytes();
-            send_stream
-                .write_all(&frame_bytes)
-                .await
-                .context("Failed to write to QUIC stream")?;
-            send_stream
-                .finish()
-                .context("Failed to finish QUIC send stream")?;
-
-            // レスポンスを受信してチャンネルに送る
-            let tx = self.tx.clone();
-            let task = tokio::spawn(async move {
-                match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
-                    Ok(data) => {
-                        // フレームからProtocolMessageを復元
-                        let frame_bytes = bytes::Bytes::from(data);
-                        if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes)
-                            && let Ok(response) = ProtocolMessage::from_frame(&frame)
-                        {
-                            let _ = tx.send(response);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read response: {}", e);
-                    }
-                }
-            });
-
-            // タスクハンドルを保存
-            self.response_tasks.lock().await.push(task);
-
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("QUIC not connected"))
-        }
+        parse_ipv6_address(addr)
     }
 
     pub async fn receive(&self) -> Result<ProtocolMessage> {
@@ -441,7 +401,7 @@ impl QuicServer {
         let private_key = PrivateKeyDer::try_from(key_data_owned.as_ref())
             .map_err(|e| anyhow::anyhow!("Failed to parse embedded private key: {}", e))?;
 
-        info!("🔐 Loaded embedded certificate from rust-embed");
+        info!("Loaded embedded certificate from rust-embed");
         Ok((certs, private_key.clone_key()))
     }
 
@@ -454,7 +414,7 @@ impl QuicServer {
         if std::path::Path::new(DEFAULT_CERT_PATH).exists()
             && std::path::Path::new(DEFAULT_KEY_PATH).exists()
         {
-            info!("🔐 Loading certificate from external files");
+            info!("Loading certificate from external files");
             return Self::load_cert_from_files(DEFAULT_CERT_PATH, DEFAULT_KEY_PATH);
         }
 
@@ -464,7 +424,7 @@ impl QuicServer {
         }
 
         // Priority 3: Generate self-signed certificate
-        info!("🔐 Generating self-signed certificate (no certificate files found)");
+        info!("Generating self-signed certificate (no certificate files found)");
         Self::generate_self_signed_cert()
     }
 
@@ -515,63 +475,7 @@ impl QuicServer {
 
     /// IPv6専用でソケットアドレスを解析
     fn parse_socket_addr(addr: &str) -> Result<SocketAddr> {
-        // まず直接パースを試みる（IPv6のみ受け入れる）
-        if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
-            match socket_addr {
-                SocketAddr::V6(_) => return Ok(socket_addr),
-                SocketAddr::V4(_) => {
-                    return Err(anyhow::anyhow!(
-                        "IPv4アドレスはサポートされていません: {}",
-                        addr
-                    ));
-                }
-            }
-        }
-
-        // ポート番号が含まれていない場合のデフォルトポート
-        const DEFAULT_PORT: u16 = 8080;
-
-        // IPv6アドレスとして解析を試みる
-        if addr.contains(':') && !addr.contains('[') {
-            // IPv6アドレスにポートを追加
-            let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
-            if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
-                return Ok(socket_addr);
-            }
-        }
-
-        // ポート番号のみの場合はIPv6ループバックを使用
-        if let Ok(port) = addr.parse::<u16>() {
-            return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
-        }
-
-        // [IPv6]:port 形式を解析
-        if addr.starts_with('[')
-            && let Some(end) = addr.find(']')
-        {
-            let ipv6_str = &addr[1..end];
-            let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
-                &addr[end + 2..]
-            } else {
-                return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
-            };
-
-            let ipv6 = ipv6_str
-                .parse::<std::net::Ipv6Addr>()
-                .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
-            let port = if port_str.is_empty() {
-                DEFAULT_PORT
-            } else {
-                port_str
-                    .parse::<u16>()
-                    .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
-            };
-
-            return Ok(SocketAddr::from((ipv6, port)));
-        }
-
-        // その他の場合はエラー
-        Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr))
+        parse_ipv6_address(addr)
     }
 
     /// バインド済みのローカルアドレスを取得
@@ -655,26 +559,25 @@ impl QuicServer {
 ///
 /// サーバーが `connection.open_bi()` で開いたストリーム（Identity 送信等）を
 /// `accept_bi()` で受信し、ProtocolMessage に変換して tx チャネルに送る。
-async fn client_accept_bi_loop(
-    connection: Connection,
-    tx: mpsc::UnboundedSender<ProtocolMessage>,
-) {
+async fn client_accept_bi_loop(connection: Connection, tx: mpsc::UnboundedSender<ProtocolMessage>) {
     loop {
         match connection.accept_bi().await {
             Ok((_send_stream, mut recv_stream)) => {
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    match recv_stream.read_to_end(MAX_MESSAGE_SIZE).await {
-                        Ok(data) if !data.is_empty() => {
-                            let frame_bytes = bytes::Bytes::from(data);
+                    match read_typed_frame(&mut recv_stream).await {
+                        Ok((FRAME_TYPE_PROTOCOL, frame_bytes)) => {
                             if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes)
                                 && let Ok(message) = ProtocolMessage::from_frame(&frame)
                             {
                                 let _ = tx.send(message);
                             }
                         }
-                        Ok(_) => {
-                            // 空データ — 無視
+                        Ok((frame_type, _)) => {
+                            warn!(
+                                "Unexpected frame type in server-initiated stream: 0x{:02x}",
+                                frame_type
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to read server-initiated stream: {}", e);
@@ -710,7 +613,9 @@ async fn handle_connection(
         let frame_bytes = frame.to_bytes();
         match connection.open_bi().await {
             Ok((mut send_stream, _recv_stream)) => {
-                if let Err(e) = send_stream.write_all(&frame_bytes).await {
+                if let Err(e) =
+                    write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes).await
+                {
                     warn!("Failed to send identity: {}", e);
                 } else {
                     let _ = send_stream.finish();
@@ -724,12 +629,10 @@ async fn handle_connection(
     }
 
     // 接続イベントを送信
-    server
-        .emit_connection_event(super::server::ConnectionEvent::Connected {
-            remote_addr,
-            context: Arc::clone(&ctx),
-        })
-        .await;
+    server.emit_connection_event(super::server::ConnectionEvent::Connected {
+        remote_addr,
+        context: Arc::clone(&ctx),
+    });
 
     loop {
         let connection_clone = connection.clone();
@@ -798,20 +701,16 @@ async fn handle_connection(
             }
             Err(quinn::ConnectionError::ApplicationClosed(_)) => {
                 info!("Client disconnected");
-                server
-                    .emit_connection_event(super::server::ConnectionEvent::Disconnected {
-                        remote_addr,
-                    })
-                    .await;
+                server.emit_connection_event(super::server::ConnectionEvent::Disconnected {
+                    remote_addr,
+                });
                 break;
             }
             Err(e) => {
                 error!("Failed to accept stream: {}", e);
-                server
-                    .emit_connection_event(super::server::ConnectionEvent::Disconnected {
-                        remote_addr,
-                    })
-                    .await;
+                server.emit_connection_event(super::server::ConnectionEvent::Disconnected {
+                    remote_addr,
+                });
                 break;
             }
         }
@@ -883,7 +782,6 @@ pub struct UnisonStream {
     send_stream: Arc<Mutex<Option<SendStream>>>,
     recv_stream: Arc<Mutex<Option<RecvStream>>>,
     is_active: Arc<AtomicBool>,
-    handle: StreamHandle,
 }
 
 impl UnisonStream {
@@ -902,12 +800,6 @@ impl UnisonStream {
             .await
             .context("Failed to open bidirectional stream")?;
 
-        let handle = StreamHandle {
-            stream_id: id,
-            method: method.clone(),
-            created_at: SystemTime::now(),
-        };
-
         Ok(Self {
             stream_id: id,
             method,
@@ -915,7 +807,6 @@ impl UnisonStream {
             send_stream: Arc::new(Mutex::new(Some(send_stream))),
             recv_stream: Arc::new(Mutex::new(Some(recv_stream))),
             is_active: Arc::new(AtomicBool::new(true)),
-            handle,
         })
     }
 
@@ -927,12 +818,6 @@ impl UnisonStream {
         send_stream: SendStream,
         recv_stream: RecvStream,
     ) -> Self {
-        let handle = StreamHandle {
-            stream_id,
-            method: method.clone(),
-            created_at: SystemTime::now(),
-        };
-
         Self {
             stream_id,
             method,
@@ -940,8 +825,12 @@ impl UnisonStream {
             send_stream: Arc::new(Mutex::new(Some(send_stream))),
             recv_stream: Arc::new(Mutex::new(Some(recv_stream))),
             is_active: Arc::new(AtomicBool::new(true)),
-            handle,
         }
+    }
+
+    /// ストリーム稼働状態の確認
+    pub fn is_active(&self) -> bool {
+        self.is_active.load(Ordering::SeqCst)
     }
 }
 
@@ -1070,121 +959,5 @@ impl UnisonStream {
                 "Receive stream is closed".to_string(),
             ))
         }
-    }
-}
-
-impl SystemStream for UnisonStream {
-    async fn send(&mut self, data: serde_json::Value) -> Result<(), NetworkError> {
-        if !self.is_active() {
-            return Err(NetworkError::Connection("Stream is not active".to_string()));
-        }
-
-        let message = ProtocolMessage::new_with_json(
-            self.stream_id,
-            self.method.clone(),
-            MessageType::Event,
-            data,
-        )?;
-
-        // ProtocolMessageをフレームに変換
-        let frame = message.into_frame()?;
-        let frame_bytes = frame.to_bytes();
-
-        let mut send_guard = self.send_stream.lock().await;
-        if let Some(send_stream) = send_guard.as_mut() {
-            send_stream
-                .write_all(&frame_bytes)
-                .await
-                .map_err(|e| NetworkError::Quic(format!("Failed to send data: {}", e)))?;
-            Ok(())
-        } else {
-            Err(NetworkError::Connection(
-                "Send stream is closed".to_string(),
-            ))
-        }
-    }
-
-    async fn receive(&mut self) -> Result<serde_json::Value, NetworkError> {
-        if !self.is_active() {
-            return Err(NetworkError::Connection("Stream is not active".to_string()));
-        }
-
-        let mut recv_guard = self.recv_stream.lock().await;
-        if let Some(recv_stream) = recv_guard.as_mut() {
-            let data = recv_stream
-                .read_to_end(MAX_MESSAGE_SIZE)
-                .await // 8MB limit
-                .map_err(|e| NetworkError::Quic(format!("Failed to receive data: {}", e)))?;
-
-            if data.is_empty() {
-                self.is_active.store(false, Ordering::SeqCst);
-                return Err(NetworkError::Connection("Stream ended".to_string()));
-            }
-
-            // BytesからフレームをデシリアライズしてProtocolMessageを復元
-            let frame_bytes = bytes::Bytes::from(data);
-            let frame = ProtocolFrame::from_bytes(&frame_bytes)?;
-            let message = ProtocolMessage::from_frame(&frame)?;
-
-            match message.msg_type {
-                MessageType::Response | MessageType::Event => message.payload_as_value(),
-                MessageType::Error => {
-                    self.is_active.store(false, Ordering::SeqCst);
-                    let error_msg = message
-                        .payload_as_value()
-                        .ok()
-                        .and_then(|v| {
-                            v.get("message")
-                                .and_then(|m| m.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    Err(NetworkError::Protocol(format!(
-                        "Stream error: {}",
-                        error_msg
-                    )))
-                }
-                _ => Err(NetworkError::Protocol(format!(
-                    "Unexpected message type: {:?}",
-                    message.msg_type
-                ))),
-            }
-        } else {
-            Err(NetworkError::Connection(
-                "Receive stream is closed".to_string(),
-            ))
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.is_active.load(Ordering::SeqCst)
-    }
-
-    async fn close(&mut self) -> Result<(), NetworkError> {
-        self.is_active.store(false, Ordering::SeqCst);
-
-        // Close send stream
-        if let Some(mut send_stream) = self.send_stream.lock().await.take() {
-            send_stream
-                .finish()
-                .map_err(|e| NetworkError::Quic(format!("Failed to close send stream: {}", e)))?;
-        }
-
-        // Close receive stream
-        if let Some(mut recv_stream) = self.recv_stream.lock().await.take() {
-            recv_stream.stop(quinn::VarInt::from_u32(0)).map_err(|e| {
-                NetworkError::Quic(format!("Failed to close receive stream: {}", e))
-            })?;
-        }
-
-        info!(
-            "🔒 SystemStream {} closed for method '{}'",
-            self.stream_id, self.method
-        );
-        Ok(())
-    }
-
-    fn get_handle(&self) -> StreamHandle {
-        self.handle.clone()
     }
 }
