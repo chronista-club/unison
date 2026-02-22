@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::identity::ServerIdentity;
+use super::identity::{ChannelDirection, ServerIdentity};
 
 /// 接続ごとの状態を管理する構造体
 #[derive(Debug)]
@@ -27,14 +27,6 @@ pub struct ChannelHandle {
     pub channel_name: String,
     pub stream_id: u64,
     pub direction: ChannelDirection,
-}
-
-/// チャネルの方向（Context用）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelDirection {
-    Send,
-    Receive,
-    Bidirectional,
 }
 
 impl ConnectionContext {
@@ -118,13 +110,13 @@ mod tests {
         let handle = ChannelHandle {
             channel_name: "events".to_string(),
             stream_id: 1,
-            direction: ChannelDirection::Receive,
+            direction: ChannelDirection::ServerToClient,
         };
         ctx.register_channel(handle).await;
 
         let retrieved = ctx.get_channel("events").await.unwrap();
         assert_eq!(retrieved.stream_id, 1);
-        assert_eq!(retrieved.direction, ChannelDirection::Receive);
+        assert_eq!(retrieved.direction, ChannelDirection::ServerToClient);
 
         let names = ctx.channel_names().await;
         assert_eq!(names, vec!["events"]);

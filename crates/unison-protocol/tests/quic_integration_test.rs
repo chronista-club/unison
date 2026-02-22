@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::{Level, info};
 use unison::network::channel::UnisonChannel;
-use unison::network::{MessageType, UnisonServer};
+use unison::network::MessageType;
 use unison::{ProtocolServer, UnisonProtocol};
 
 /// QUIC統合テスト - サーバーとクライアントを同一プロセスでテスト
@@ -48,7 +48,7 @@ async fn run_test_server() -> Result<()> {
     protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
 
     // サーバー作成とハンドラー登録
-    let mut server = protocol.create_server();
+    let server = protocol.create_server();
     let start_time = Instant::now();
 
     register_test_channel_handlers(&server, start_time).await;
@@ -73,7 +73,7 @@ async fn run_test_client() -> Result<()> {
     protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
 
     // クライアント作成と接続
-    let mut client = protocol.create_client()?;
+    let client = protocol.create_client()?;
     client.connect("[::1]:8080").await?;
     info!("Connected to test server via IPv6");
 

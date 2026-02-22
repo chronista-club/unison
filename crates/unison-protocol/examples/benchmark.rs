@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
 use tracing::{Level, info};
 use unison::network::channel::UnisonChannel;
-use unison::network::{MessageType, UnisonServer};
+use unison::network::MessageType;
 use unison::network::quic::QuicClient;
 use unison::{ProtocolClient, ProtocolServer};
 
@@ -67,7 +67,7 @@ async fn measure_throughput(
 
 /// ベンチマークサーバーを起動
 async fn start_benchmark_server() -> Result<()> {
-    let mut server = ProtocolServer::new();
+    let server = ProtocolServer::new();
 
     server
         .register_channel("bench", |_ctx, stream| async move {
@@ -89,8 +89,8 @@ async fn start_benchmark_server() -> Result<()> {
         })
         .await;
 
-    info!("Benchmark server starting on 127.0.0.1:8080");
-    server.listen("127.0.0.1:8080").await?;
+    info!("Benchmark server starting on [::1]:8080");
+    server.listen("[::1]:8080").await?;
 
     Ok(())
 }
@@ -98,8 +98,8 @@ async fn start_benchmark_server() -> Result<()> {
 /// ベンチマークを実行
 async fn run_benchmark(message_size: usize) -> Result<BenchmarkResult> {
     let quic_client = QuicClient::new()?;
-    let mut client = ProtocolClient::new(quic_client);
-    client.connect("127.0.0.1:8080").await?;
+    let client = ProtocolClient::new(quic_client);
+    client.connect("[::1]:8080").await?;
 
     let channel = client.open_channel("bench").await?;
 

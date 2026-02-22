@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use unison::context::{
-    CgpProtocolContext, Handler, HandlerRegistry, MessageHandler, QuicTransportAdapter,
-    ServiceRegistry, ServiceRegistryAdapter, TransportLayer, UnisonContextBuilder,
+    CgpProtocolContext, Handler, HandlerRegistry, MessageHandler, ServiceRegistry, TransportLayer,
+    UnisonContextBuilder,
 };
 use unison::network::{MessageType, NetworkError, ProtocolMessage};
 

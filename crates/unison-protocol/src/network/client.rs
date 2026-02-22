@@ -1,19 +1,15 @@
 use anyhow::Result;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use super::channel::UnisonChannel;
 use super::context::ConnectionContext;
 use super::identity::ServerIdentity;
 use super::quic::{FRAME_TYPE_PROTOCOL, QuicClient, UnisonStream, write_typed_frame};
-use super::service::Service;
-use super::{MessageType, NetworkError, ProtocolMessage, UnisonClient};
+use super::{MessageType, NetworkError, ProtocolMessage};
 
 /// QUIC protocol client implementation
 pub struct ProtocolClient {
     transport: Arc<QuicClient>,
-    services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
     /// 接続コンテキスト（Identity情報・チャネル状態）
     context: Arc<ConnectionContext>,
 }
@@ -22,7 +18,6 @@ impl ProtocolClient {
     pub fn new(transport: QuicClient) -> Self {
         Self {
             transport: Arc::new(transport),
-            services: Arc::new(RwLock::new(HashMap::new())),
             context: Arc::new(ConnectionContext::new()),
         }
     }
@@ -32,7 +27,6 @@ impl ProtocolClient {
         let transport = QuicClient::new()?;
         Ok(Self {
             transport: Arc::new(transport),
-            services: Arc::new(RwLock::new(HashMap::new())),
             context: Arc::new(ConnectionContext::new()),
         })
     }
@@ -99,7 +93,7 @@ impl ProtocolClient {
             .register_channel(super::context::ChannelHandle {
                 channel_name: channel_name.to_string(),
                 stream_id: request_id,
-                direction: super::context::ChannelDirection::Bidirectional,
+                direction: super::identity::ChannelDirection::Bidirectional,
             })
             .await;
 
@@ -126,89 +120,9 @@ impl ProtocolClient {
         }
     }
 
-    /// サーバーに接続し、チャネル名のリストに基づいて複数チャネルを開く
-    pub async fn connect_with_channels(
-        &mut self,
-        url: &str,
-        channel_names: &[&str],
-    ) -> Result<Vec<String>, NetworkError> {
-        UnisonClient::connect(self, url).await?;
-
-        let mut opened = Vec::new();
-        for name in channel_names {
-            self.context
-                .register_channel(super::context::ChannelHandle {
-                    channel_name: name.to_string(),
-                    stream_id: 0,
-                    direction: super::context::ChannelDirection::Bidirectional,
-                })
-                .await;
-            opened.push(name.to_string());
-        }
-
-        Ok(opened)
-    }
-
-    /// Register a Service instance with the client
-    pub async fn register_service(&self, service: crate::network::service::UnisonService) {
-        let service_name = service.service_name().to_string();
-        let mut services = self.services.write().await;
-        services.insert(service_name, service);
-    }
-
-    /// Get registered services list
-    pub async fn list_services(&self) -> Vec<String> {
-        let services = self.services.read().await;
-        services.keys().cloned().collect()
-    }
-
-    /// Call a service method directly
-    pub async fn call_service(
-        &self,
-        service_name: &str,
-        method: &str,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, NetworkError> {
-        let mut services = self.services.write().await;
-        if let Some(service) = services.get_mut(service_name) {
-            service.handle_request(method, payload).await
-        } else {
-            Err(NetworkError::HandlerNotFound {
-                method: format!("{}::{}", service_name, method),
-            })
-        }
-    }
-
-    pub async fn connect(&mut self, url: &str) -> Result<()> {
-        Arc::get_mut(&mut self.transport)
-            .ok_or_else(|| anyhow::anyhow!("Failed to get mutable transport"))?
-            .connect(url)
-            .await
-    }
-
-    pub async fn disconnect(&mut self) -> Result<()> {
-        Arc::get_mut(&mut self.transport)
-            .ok_or_else(|| anyhow::anyhow!("Failed to get mutable transport"))?
-            .disconnect()
-            .await
-    }
-
-    pub async fn is_connected(&self) -> bool {
-        self.transport.is_connected().await
-    }
-
-}
-
-fn generate_request_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::SeqCst)
-}
-
-impl UnisonClient for ProtocolClient {
-    async fn connect(&mut self, url: &str) -> Result<(), NetworkError> {
-        Arc::get_mut(&mut self.transport)
-            .ok_or_else(|| NetworkError::Connection("Failed to get mutable transport".to_string()))?
+    /// Unisonサーバーへの接続（Identity Handshake 含む）
+    pub async fn connect(&self, url: &str) -> Result<(), NetworkError> {
+        self.transport
             .connect(url)
             .await
             .map_err(|e| NetworkError::Connection(e.to_string()))?;
@@ -230,15 +144,22 @@ impl UnisonClient for ProtocolClient {
         Ok(())
     }
 
-    async fn disconnect(&mut self) -> Result<(), NetworkError> {
-        Arc::get_mut(&mut self.transport)
-            .ok_or_else(|| NetworkError::Connection("Failed to get mutable transport".to_string()))?
+    /// サーバーからの切断
+    pub async fn disconnect(&self) -> Result<(), NetworkError> {
+        self.transport
             .disconnect()
             .await
             .map_err(|e| NetworkError::Connection(e.to_string()))
     }
 
-    fn is_connected(&self) -> bool {
-        false
+    /// クライアント接続状態の確認
+    pub async fn is_connected(&self) -> bool {
+        self.transport.is_connected().await
     }
+}
+
+fn generate_request_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::SeqCst)
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use unison::network::channel::UnisonChannel;
-use unison::network::{MessageType, UnisonClient, UnisonServer, quic::QuicClient};
+use unison::network::{MessageType, quic::QuicClient};
 use unison::{ProtocolClient, ProtocolServer};
 
 /// バッチサイズのバリエーション
@@ -62,9 +62,9 @@ fn bench_message_throughput(c: &mut Criterion) {
                     tokio::spawn({
                         let processed = processed.clone();
                         async move {
-                            let mut server = ProtocolServer::new();
+                            let server = ProtocolServer::new();
                             register_echo_channel(&server, processed).await;
-                            let _ = server.listen("127.0.0.1:8081").await;
+                            let _ = server.listen("[::1]:8081").await;
                             tokio::time::sleep(Duration::from_secs(3600)).await;
                         }
                     });
@@ -72,8 +72,8 @@ fn bench_message_throughput(c: &mut Criterion) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
 
                     let quic_client = QuicClient::new().unwrap();
-                    let mut client = ProtocolClient::new(quic_client);
-                    client.connect("127.0.0.1:8081").await.unwrap();
+                    let client = ProtocolClient::new(quic_client);
+                    client.connect("[::1]:8081").await.unwrap();
 
                     let channel = client.open_channel("bench").await.unwrap();
                     let payload_data = "x".repeat(payload_size);
@@ -114,9 +114,9 @@ fn bench_streaming_throughput(c: &mut Criterion) {
         group.bench_function(format!("stream_{}_bytes", payload_size), |b| {
             b.to_async(&runtime).iter(|| async move {
                 tokio::spawn(async move {
-                    let mut server = ProtocolServer::new();
+                    let server = ProtocolServer::new();
                     register_echo_channel(&server, Arc::new(AtomicU64::new(0))).await;
-                    let _ = server.listen("127.0.0.1:8082").await;
+                    let _ = server.listen("[::1]:8082").await;
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                 });
 
@@ -124,7 +124,7 @@ fn bench_streaming_throughput(c: &mut Criterion) {
 
                 let quic_client = QuicClient::new().unwrap();
                 let mut client = ProtocolClient::new(quic_client);
-                client.connect("127.0.0.1:8082").await.unwrap();
+                client.connect("[::1]:8082").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();
                 let payload_data = "x".repeat(payload_size);
@@ -167,9 +167,9 @@ fn bench_parallel_throughput(c: &mut Criterion) {
                 tokio::spawn({
                     let counter = counter.clone();
                     async move {
-                        let mut server = ProtocolServer::new();
+                        let server = ProtocolServer::new();
                         register_echo_channel(&server, counter).await;
-                        let _ = server.listen("127.0.0.1:8083").await;
+                        let _ = server.listen("[::1]:8083").await;
                         tokio::time::sleep(Duration::from_secs(3600)).await;
                     }
                 });
@@ -180,8 +180,8 @@ fn bench_parallel_throughput(c: &mut Criterion) {
                 for _ in 0..num_workers {
                     let handle = tokio::spawn(async move {
                         let quic_client = QuicClient::new().unwrap();
-                        let mut client = ProtocolClient::new(quic_client);
-                        client.connect("127.0.0.1:8083").await.unwrap();
+                        let client = ProtocolClient::new(quic_client);
+                        client.connect("[::1]:8083").await.unwrap();
 
                         let channel = client.open_channel("bench").await.unwrap();
                         let mut local_count = 0u64;
@@ -224,9 +224,9 @@ fn bench_burst_throughput(c: &mut Criterion) {
         group.bench_function(format!("burst_{}", burst_size), |b| {
             b.to_async(&runtime).iter(|| async move {
                 tokio::spawn(async move {
-                    let mut server = ProtocolServer::new();
+                    let server = ProtocolServer::new();
                     register_echo_channel(&server, Arc::new(AtomicU64::new(0))).await;
-                    let _ = server.listen("127.0.0.1:8084").await;
+                    let _ = server.listen("[::1]:8084").await;
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                 });
 
@@ -234,7 +234,7 @@ fn bench_burst_throughput(c: &mut Criterion) {
 
                 let quic_client = QuicClient::new().unwrap();
                 let mut client = ProtocolClient::new(quic_client);
-                client.connect("127.0.0.1:8084").await.unwrap();
+                client.connect("[::1]:8084").await.unwrap();
 
                 let channel = client.open_channel("bench").await.unwrap();
                 let start = std::time::Instant::now();

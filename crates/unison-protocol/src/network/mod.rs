@@ -10,15 +10,11 @@ pub mod context;
 pub mod identity;
 pub mod quic;
 pub mod server;
-pub mod service;
 
 pub use channel::UnisonChannel;
 pub use client::ProtocolClient;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
 pub use server::{ConnectionEvent, ProtocolServer, ServerHandle};
-pub use service::{
-    RealtimeService, Service, ServiceConfig, ServicePriority, ServiceStats, UnisonService,
-};
 
 /// Unison Protocolのネットワークエラー
 #[derive(Error, Debug)]
@@ -122,66 +118,3 @@ pub struct ProtocolError {
     pub details: Option<serde_json::Value>,
 }
 
-/// Unison Protocolクライアントトレイト (Rust 2024対応)
-///
-/// Unified Channel 以降、RPC (`call()`) は削除。
-/// チャネル経由で `UnisonChannel::request()` を使用する。
-pub trait UnisonClient: Send + Sync {
-    /// Unisonサーバーへの接続
-    fn connect(
-        &mut self,
-        url: &str,
-    ) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// サーバーからの切断
-    fn disconnect(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// クライアント接続状態の確認
-    fn is_connected(&self) -> bool;
-}
-
-/// Unison Protocolサーバートレイト (Rust 2024対応)
-pub trait UnisonServer: Send + Sync {
-    /// 接続の待ち受け開始
-    fn listen(
-        &mut self,
-        addr: &str,
-    ) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// サーバーの停止
-    fn stop(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// サーバー実行状態の確認
-    fn is_running(&self) -> bool;
-}
-
-/// SystemStream - QUIC用双方向ストリームトレイト (Rust 2024対応)
-pub trait SystemStream: Send + Sync {
-    /// ストリームでのデータ送信
-    fn send(
-        &mut self,
-        data: serde_json::Value,
-    ) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// ストリームからのデータ受信
-    fn receive(
-        &mut self,
-    ) -> impl std::future::Future<Output = Result<serde_json::Value, NetworkError>> + Send;
-
-    /// ストリーム稼働状態の確認
-    fn is_active(&self) -> bool;
-
-    /// ストリームの終了
-    fn close(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
-
-    /// ストリームメタデータの取得
-    fn get_handle(&self) -> StreamHandle;
-}
-
-/// 双方向ストリーム管理用ストリームハンドル
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHandle {
-    pub stream_id: u64,
-    pub method: String,
-    pub created_at: std::time::SystemTime,
-}

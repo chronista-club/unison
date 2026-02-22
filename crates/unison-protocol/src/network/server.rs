@@ -1,14 +1,13 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use super::identity::{ChannelDirection, ChannelInfo, ChannelStatus, ServerIdentity};
-use super::service::Service;
-use super::{NetworkError, UnisonServer};
+use super::NetworkError;
 
 /// 接続イベント通知
 #[derive(Debug, Clone)]
@@ -65,28 +64,27 @@ impl ServerHandle {
 
 /// プロトコルサーバー実装
 pub struct ProtocolServer {
-    services: Arc<RwLock<HashMap<String, crate::network::service::UnisonService>>>,
-    running: Arc<RwLock<bool>>,
+    running: Arc<AtomicBool>,
     /// サーバー識別情報
     server_name: String,
     server_version: String,
     server_namespace: String,
     /// チャネルハンドラー（チャネル名 → ハンドラー関数）
     channel_handlers: Arc<RwLock<HashMap<String, ChannelHandler>>>,
-    /// 接続イベント送信チャネル
-    connection_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<ConnectionEvent>>>>,
+    /// 接続イベント broadcast チャネル（複数サブスクライバ対応）
+    connection_event_tx: tokio::sync::broadcast::Sender<ConnectionEvent>,
 }
 
 impl ProtocolServer {
     pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            services: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(RwLock::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
             server_name: "unison".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             server_namespace: "default".to_string(),
             channel_handlers: Arc::new(RwLock::new(HashMap::new())),
-            connection_event_tx: Arc::new(RwLock::new(None)),
+            connection_event_tx: tx,
         }
     }
 
@@ -98,6 +96,11 @@ impl ProtocolServer {
             server_namespace: namespace.to_string(),
             ..Self::new()
         }
+    }
+
+    /// サーバー実行状態の確認
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 
     /// 登録済みチャネルからServerIdentityを構築
@@ -146,22 +149,16 @@ impl ProtocolServer {
     /// 接続イベントを購読する
     ///
     /// 接続/切断時に `ConnectionEvent` を受信できる。
-    /// 複数回呼ぶと最後の Receiver だけが有効になる。
-    pub async fn subscribe_connection_events(
+    /// 複数のサブスクライバが同時に購読可能。
+    pub fn subscribe_connection_events(
         &self,
-    ) -> tokio::sync::mpsc::Receiver<ConnectionEvent> {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let mut guard = self.connection_event_tx.write().await;
-        *guard = Some(tx);
-        rx
+    ) -> tokio::sync::broadcast::Receiver<ConnectionEvent> {
+        self.connection_event_tx.subscribe()
     }
 
     /// 接続イベントを送信（内部用）
-    pub(crate) async fn emit_connection_event(&self, event: ConnectionEvent) {
-        let guard = self.connection_event_tx.read().await;
-        if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(event).await;
-        }
+    pub(crate) fn emit_connection_event(&self, event: ConnectionEvent) {
+        let _ = self.connection_event_tx.send(event);
     }
 
     /// チャネルハンドラーを取得
@@ -170,40 +167,33 @@ impl ProtocolServer {
         handlers.get(name).cloned()
     }
 
-    /// サーバーにサービスインスタンスを登録
-    pub async fn register_service(&self, service: crate::network::service::UnisonService) {
-        let service_name = service.service_name().to_string();
-        let mut services = self.services.write().await;
-        services.insert(service_name, service);
+    /// 接続の待ち受け開始（self を消費してブロック）
+    ///
+    /// サーバーを起動し、接続を受け付ける。終了するまでブロックする。
+    /// 非ブロッキングで起動する場合は `spawn_listen()` を使用する。
+    pub async fn listen(self, addr: &str) -> Result<(), NetworkError> {
+        use super::quic::QuicServer;
+
+        let protocol_server = Arc::new(self);
+        protocol_server.running.store(true, Ordering::SeqCst);
+
+        let mut quic_server = QuicServer::new(Arc::clone(&protocol_server));
+        quic_server
+            .bind(addr)
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()))?;
+
+        tracing::info!("Unison Protocol server listening on {} via QUIC", addr);
+
+        let result = quic_server
+            .start()
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()));
+
+        protocol_server.running.store(false, Ordering::SeqCst);
+        result
     }
 
-    /// 登録されたサービスリストを取得
-    pub async fn list_services(&self) -> Vec<String> {
-        let services = self.services.read().await;
-        services.keys().cloned().collect()
-    }
-
-    /// 登録されたサービスへのルーティングによるサービスリクエストの処理
-    pub async fn handle_service_request(
-        &self,
-        service_name: &str,
-        method: &str,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let mut services = self.services.write().await;
-        if let Some(service) = services.get_mut(service_name) {
-            service
-                .handle_request(method, payload)
-                .await
-                .map_err(|e| anyhow::anyhow!("Service error: {}", e))
-        } else {
-            Err(anyhow::anyhow!("Service not found: {}", service_name))
-        }
-    }
-
-}
-
-impl ProtocolServer {
     /// バックグラウンドでサーバーを起動し、ServerHandle を返す
     ///
     /// `ServerHandle::shutdown()` でグレースフルに停止できる。
@@ -224,10 +214,7 @@ impl ProtocolServer {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-        {
-            let mut running = protocol_server.running.write().await;
-            *running = true;
-        }
+        protocol_server.running.store(true, Ordering::SeqCst);
 
         tracing::info!("Unison Protocol server spawned on {} via QUIC", local_addr);
 
@@ -238,8 +225,7 @@ impl ProtocolServer {
                 .await
                 .map_err(|e| NetworkError::Quic(e.to_string()));
 
-            let mut running = server_clone.running.write().await;
-            *running = false;
+            server_clone.running.store(false, Ordering::SeqCst);
 
             result
         });
@@ -258,96 +244,12 @@ impl Default for ProtocolServer {
     }
 }
 
-impl UnisonServer for ProtocolServer {
-    async fn listen(&mut self, addr: &str) -> Result<(), NetworkError> {
-        use super::quic::QuicServer;
-
-        // 実行状態を設定
-        {
-            let mut running = self.running.write().await;
-            *running = true;
-        }
-
-        // プロトコルハンドラーとして自分自身を使用してQUICサーバーを作成
-        let protocol_server = Arc::new(ProtocolServer {
-            services: Arc::clone(&self.services),
-            running: Arc::clone(&self.running),
-            server_name: self.server_name.clone(),
-            server_version: self.server_version.clone(),
-            server_namespace: self.server_namespace.clone(),
-            channel_handlers: Arc::clone(&self.channel_handlers),
-            connection_event_tx: Arc::clone(&self.connection_event_tx),
-        });
-
-        let mut quic_server = QuicServer::new(protocol_server);
-        quic_server
-            .bind(addr)
-            .await
-            .map_err(|e| NetworkError::Quic(e.to_string()))?;
-
-        tracing::info!("🎵 Unison Protocol server listening on {} via QUIC", addr);
-
-        quic_server
-            .start()
-            .await
-            .map_err(|e| NetworkError::Quic(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<(), NetworkError> {
-        let mut running = self.running.write().await;
-        *running = false;
-        tracing::info!("🎵 Unison Protocol server stopped");
-        Ok(())
-    }
-
-    fn is_running(&self) -> bool {
-        false
-    }
-}
-
-/// ProtocolServerのサービス管理拡張
-impl ProtocolServer {
-    /// 自動起動でサービスを登録
-    pub async fn register_and_start_service(
-        &self,
-        mut service: crate::network::service::UnisonService,
-    ) -> Result<String, NetworkError> {
-        let service_name = service.service_name().to_string();
-
-        // 設定されている場合はサービスハートビートを開始
-        service.start_service_heartbeat(30).await?;
-
-        // サービスを登録
-        self.register_service(service).await;
-
-        tracing::info!("🎵 Service '{}' registered and started", service_name);
-        Ok(service_name)
-    }
-
-    /// すべてのサービスを正常に停止
-    pub async fn shutdown_all_services(&self) -> Result<(), NetworkError> {
-        let mut services = self.services.write().await;
-
-        for (name, service) in services.iter_mut() {
-            tracing::info!("🛑 Shutting down service: {}", name);
-            if let Err(e) = service.shutdown().await {
-                tracing::error!("Error shutting down service {}: {}", name, e);
-            }
-        }
-
-        services.clear();
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_server_creation() {
+    #[test]
+    fn test_server_creation() {
         let server = ProtocolServer::new();
         assert!(!server.is_running());
     }
@@ -364,7 +266,5 @@ mod tests {
         // チャネルハンドラーが取得できること
         let handler = server.get_channel_handler("ping").await;
         assert!(handler.is_some());
-
-        assert!(server.list_services().await.is_empty());
     }
 }
