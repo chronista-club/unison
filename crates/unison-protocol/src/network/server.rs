@@ -171,6 +171,9 @@ impl ProtocolServer {
     ///
     /// サーバーを起動し、接続を受け付ける。終了するまでブロックする。
     /// 非ブロッキングで起動する場合は `spawn_listen()` を使用する。
+    ///
+    /// **注意**: self を消費するため、`subscribe_connection_events()` は
+    /// このメソッドの呼び出し前に行う必要がある。
     pub async fn listen(self, addr: &str) -> Result<(), NetworkError> {
         use super::quic::QuicServer;
 
@@ -197,6 +200,9 @@ impl ProtocolServer {
     /// バックグラウンドでサーバーを起動し、ServerHandle を返す
     ///
     /// `ServerHandle::shutdown()` でグレースフルに停止できる。
+    ///
+    /// **注意**: self を消費するため、`subscribe_connection_events()` は
+    /// このメソッドの呼び出し前に行う必要がある。
     pub async fn spawn_listen(self, addr: &str) -> Result<ServerHandle, NetworkError> {
         use super::quic::QuicServer;
 

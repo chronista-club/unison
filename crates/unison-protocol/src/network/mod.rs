@@ -16,6 +16,13 @@ pub use client::ProtocolClient;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
 pub use server::{ConnectionEvent, ProtocolServer, ServerHandle};
 
+/// グローバルなリクエストID生成（モジュール間で一意）
+pub(crate) fn generate_request_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
 /// Unison Protocolのネットワークエラー
 #[derive(Error, Debug)]
 pub enum NetworkError {
