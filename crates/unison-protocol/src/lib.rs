@@ -37,10 +37,10 @@
 //! - **Channel**: Request/Response + Event push をサポートする双方向通信路
 //! - **Message**: 型付きフィールドを持つ構造化データ型
 //!
-//! ## 生成コード
+//! ## コード生成
 //!
-//! プロトコル定義は、ビルドプロセス中に自動的に強く型付けされた
-//! 分散ノード実装コードにコンパイルされます。
+//! `UnisonProtocol::generate_rust_code()` / `generate_typescript_code()` で
+//! KDLスキーマから型付きコードを生成できます。
 
 pub mod codegen;
 pub mod network;
@@ -57,12 +57,6 @@ pub mod context;
 
 // よく使用される型と関数のprelude
 pub mod prelude;
-
-// 生成コードの再エクスポート
-pub mod generated {
-    // build.rsによって生成される
-    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-}
 
 // preludeの型を内部で使用
 use codegen::{CodeGenerator, RustGenerator, TypeScriptGenerator};

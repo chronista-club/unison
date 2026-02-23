@@ -38,9 +38,9 @@ Thumbs.db
 /generated/
 
 # Certificates (exclude to prevent accidental commits of private keys)
-assets/certs/*.pem
-assets/certs/*.der
-!assets/certs/README.md
+crates/unison-protocol/assets/certs/*.pem
+crates/unison-protocol/assets/certs/*.der
+!crates/unison-protocol/assets/certs/README.md
 
 *.code-workspace
 

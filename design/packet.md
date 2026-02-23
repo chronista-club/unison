@@ -323,5 +323,5 @@ fn test_large_payload_compression() {
 ## 関連ドキュメント
 
 - [アーキテクチャガイド](./architecture.md)
-- [PROTOCOL_SPEC](../../PROTOCOL_SPEC.md)
+- [PROTOCOL_SPEC](../spec/PROTOCOL_SPEC.md)
 - [API Reference](https://docs.rs/unison)
