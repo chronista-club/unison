@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::{Level, info};
 
-use unison::network::channel::UnisonChannel;
 use unison::network::MessageType;
+use unison::network::channel::UnisonChannel;
 use unison::{ProtocolClient, ProtocolServer, ServerHandle};
 
 /// テスト用のトレーシング初期化（複数テストで呼ばれても安全）
@@ -125,7 +125,10 @@ async fn test_e2e_full_protocol_flow() -> Result<()> {
     assert!(client.is_connected().await);
 
     // Identity 検証
-    let identity = client.server_identity().await.expect("Identity should exist");
+    let identity = client
+        .server_identity()
+        .await
+        .expect("Identity should exist");
     assert_eq!(identity.name, "e2e-test");
     assert_eq!(identity.version, "1.0.0");
     assert!(
@@ -145,10 +148,7 @@ async fn test_e2e_full_protocol_flow() -> Result<()> {
         response.get("message").and_then(|v| v.as_str()),
         Some("Pong: E2E")
     );
-    assert_eq!(
-        response.get("sequence").and_then(|v| v.as_i64()),
-        Some(1)
-    );
+    assert_eq!(response.get("sequence").and_then(|v| v.as_i64()), Some(1));
     info!("Ping-pong verified");
 
     // クリーンアップ
@@ -177,7 +177,10 @@ async fn test_e2e_echo_transformations() -> Result<()> {
     // Uppercase
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request("echo", json!({"data": "hello world", "transform": "uppercase"})),
+        channel.request(
+            "echo",
+            json!({"data": "hello world", "transform": "uppercase"}),
+        ),
     )
     .await??;
     assert_eq!(
@@ -230,15 +233,8 @@ async fn test_e2e_health_check() -> Result<()> {
     client.connect(&addr).await?;
     let channel = client.open_channel("ping-pong").await?;
 
-    let resp = timeout(
-        Duration::from_secs(5),
-        channel.request("health", json!({})),
-    )
-    .await??;
-    assert_eq!(
-        resp.get("status").and_then(|v| v.as_str()),
-        Some("ok")
-    );
+    let resp = timeout(Duration::from_secs(5), channel.request("health", json!({}))).await??;
+    assert_eq!(resp.get("status").and_then(|v| v.as_str()), Some("ok"));
     assert!(
         resp.get("uptime_ms").and_then(|v| v.as_u64()).is_some(),
         "uptime_ms should be present"
@@ -279,7 +275,10 @@ async fn test_e2e_complex_json_roundtrip() -> Result<()> {
 
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request("echo", json!({"data": complex_data.clone(), "transform": ""})),
+        channel.request(
+            "echo",
+            json!({"data": complex_data.clone(), "transform": ""}),
+        ),
     )
     .await??;
 
@@ -317,10 +316,7 @@ async fn test_e2e_sequential_throughput() -> Result<()> {
             channel.request("ping", json!({"message": "throughput", "sequence": i})),
         )
         .await??;
-        assert_eq!(
-            resp.get("sequence").and_then(|v| v.as_i64()),
-            Some(i),
-        );
+        assert_eq!(resp.get("sequence").and_then(|v| v.as_i64()), Some(i),);
     }
 
     let elapsed = start.elapsed();

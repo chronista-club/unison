@@ -1,7 +1,7 @@
 mod common;
 
-use unison::network::identity::*;
 use unison::network::MessageType;
+use unison::network::identity::*;
 
 #[test]
 fn test_integ_identity_to_protocol_message_round_trip() {

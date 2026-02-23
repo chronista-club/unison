@@ -35,4 +35,4 @@
 
 - [仕様書](../spec/) - 何を実現するか
 - [設計ドキュメント](../design/) - どう実装するか
-- [開発者スキル](../.claude/skills/developer.md) - コーディング規約
+- [開発者スキル](../.claude/developer.md) - コーディング規約

@@ -10,8 +10,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{Level, info};
 
-use unison::network::channel::UnisonChannel;
 use unison::network::MessageType;
+use unison::network::channel::UnisonChannel;
 use unison::{ProtocolClient, ProtocolServer};
 
 /// テスト用のトレーシング初期化（複数テストで呼ばれても安全）
@@ -36,7 +36,11 @@ async fn register_echo_handler(server: &ProtocolServer) {
                     continue;
                 }
                 let payload = msg.payload_as_value().unwrap_or_default();
-                if channel.send_response(msg.id, &msg.method, payload).await.is_err() {
+                if channel
+                    .send_response(msg.id, &msg.method, payload)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -90,7 +94,9 @@ async fn test_medium_quic_connection_lifecycle() -> Result<()> {
 
     // クライアント接続
     let client = ProtocolClient::new_default()?;
-    client.connect(&format!("[{}]:{}", addr.ip(), addr.port())).await?;
+    client
+        .connect(&format!("[{}]:{}", addr.ip(), addr.port()))
+        .await?;
     info!("Client connected");
 
     // 接続状態の確認
@@ -124,11 +130,16 @@ async fn test_medium_quic_identity_handshake() -> Result<()> {
 
     // クライアント接続（Identity Handshake は connect() 内で自動実行）
     let client = ProtocolClient::new_default()?;
-    client.connect(&format!("[{}]:{}", addr.ip(), addr.port())).await?;
+    client
+        .connect(&format!("[{}]:{}", addr.ip(), addr.port()))
+        .await?;
 
     // Identity が受信できていること
     let identity = client.server_identity().await;
-    assert!(identity.is_some(), "Identity should be received after connect");
+    assert!(
+        identity.is_some(),
+        "Identity should be received after connect"
+    );
 
     let identity = identity.unwrap();
     assert_eq!(identity.name, "test-server");
@@ -166,7 +177,9 @@ async fn test_medium_quic_channel_request_response() -> Result<()> {
 
     // クライアント接続
     let client = ProtocolClient::new_default()?;
-    client.connect(&format!("[{}]:{}", addr.ip(), addr.port())).await?;
+    client
+        .connect(&format!("[{}]:{}", addr.ip(), addr.port()))
+        .await?;
 
     // チャネル開設
     let channel = client.open_channel("echo").await?;
@@ -206,7 +219,9 @@ async fn test_medium_quic_sequential_requests() -> Result<()> {
     let addr = handle.local_addr();
 
     let client = ProtocolClient::new_default()?;
-    client.connect(&format!("[{}]:{}", addr.ip(), addr.port())).await?;
+    client
+        .connect(&format!("[{}]:{}", addr.ip(), addr.port()))
+        .await?;
 
     let channel = client.open_channel("echo").await?;
 
@@ -249,7 +264,9 @@ async fn test_medium_quic_server_shutdown_disconnects_client() -> Result<()> {
     let addr = handle.local_addr();
 
     let client = ProtocolClient::new_default()?;
-    client.connect(&format!("[{}]:{}", addr.ip(), addr.port())).await?;
+    client
+        .connect(&format!("[{}]:{}", addr.ip(), addr.port()))
+        .await?;
     assert!(client.is_connected().await);
 
     // サーバーをシャットダウン

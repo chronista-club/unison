@@ -41,7 +41,7 @@ unison/
 |------|-----|
 | edition | 2024 |
 | rust-version | 1.93 |
-| version | 0.1.0-alpha3 |
+| version | 0.3.1 |
 | resolver | 2 |
 
 ### 主要依存クレート
