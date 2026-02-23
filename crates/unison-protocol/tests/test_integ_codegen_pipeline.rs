@@ -18,7 +18,10 @@ fn test_integ_ping_pong_full_pipeline() {
     let generator = RustGenerator::new();
     let code = generator.generate(&parsed, &type_registry).unwrap();
 
-    assert!(code.contains("Ping"), "Expected Ping struct in generated code");
+    assert!(
+        code.contains("Ping"),
+        "Expected Ping struct in generated code"
+    );
     assert!(
         code.contains("Pong"),
         "Expected Pong struct in generated code"
@@ -53,18 +56,12 @@ fn test_integ_creo_sync_full_pipeline() {
         code.contains("MemoryEvent"),
         "Expected MemoryEvent from events channel"
     );
-    assert!(
-        code.contains("Query"),
-        "Expected Query from query channel"
-    );
+    assert!(code.contains("Query"), "Expected Query from query channel");
     assert!(
         code.contains("SendMessage"),
         "Expected SendMessage from messaging channel"
     );
-    assert!(
-        code.contains("Alert"),
-        "Expected Alert from urgent channel"
-    );
+    assert!(code.contains("Alert"), "Expected Alert from urgent channel");
 }
 
 /// request/returns 構文の codegen 検証
