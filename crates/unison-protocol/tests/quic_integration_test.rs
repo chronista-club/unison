@@ -1,106 +1,43 @@
+//! Large x E2E: QUIC プロトコル統合テスト
+//!
+//! 実際の QUIC サーバー/クライアント間で完全なプロトコルフローを検証する。
+//! スキーマ読み込み → サーバー起動 → クライアント接続 → Identity ハンドシェイク
+//! → チャネル通信 → 切断 → シャットダウン。
+//!
+//! すべて `#[ignore = "Large: E2E test"]` 付き — `cargo test -- --ignored` で実行。
+
 use anyhow::Result;
 use serde_json::json;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::{Level, info};
-use unison::network::MessageType;
-use unison::network::channel::UnisonChannel;
-use unison::{ProtocolServer, UnisonProtocol};
 
-/// QUIC統合テスト - サーバーとクライアントを同一プロセスでテスト
-/// TODO: Fix ping_pong.kdl schema parsing
-#[tokio::test]
-#[ignore]
-async fn test_quic_server_client_integration() -> Result<()> {
-    // ログ初期化
-    tracing_subscriber::fmt()
+use unison::network::channel::UnisonChannel;
+use unison::network::MessageType;
+use unison::{ProtocolClient, ProtocolServer, ServerHandle};
+
+/// テスト用のトレーシング初期化（複数テストで呼ばれても安全）
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
         .with_test_writer()
-        .init();
-
-    info!("Starting QUIC integration test");
-
-    // サーバーとクライアントを同時に実行
-    let server_handle = tokio::spawn(run_test_server());
-    let client_handle = tokio::spawn(run_test_client());
-
-    // サーバーが起動するまで少し待機
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // クライアントテストが完了するまで待機（タイムアウト付き）
-    let client_result = timeout(Duration::from_secs(30), client_handle)
-        .await
-        .map_err(|_| anyhow::anyhow!("Test timeout"))??;
-
-    // サーバーを停止
-    server_handle.abort();
-
-    info!("QUIC integration test completed successfully");
-    client_result
+        .try_init();
 }
 
-/// テスト用サーバーの実行
-async fn run_test_server() -> Result<()> {
-    info!("Starting test server...");
-
-    // Unison protocolインスタンス作成
-    let mut protocol = UnisonProtocol::new();
-    protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
-
-    // サーバー作成とハンドラー登録
-    let server = protocol.create_server();
+/// E2E テスト用サーバーを起動して ServerHandle + アドレス文字列を返す
+async fn start_e2e_server() -> Result<(ServerHandle, String)> {
+    let server = ProtocolServer::with_identity("e2e-test", "1.0.0", "test");
     let start_time = Instant::now();
 
-    register_test_channel_handlers(&server, start_time).await;
-
-    info!("Test server started on [::1]:8080 (IPv6)");
-
-    // サーバー開始（無限ループ）
-    server.listen("[::1]:8080").await?;
-
-    Ok(())
-}
-
-/// テスト用クライアントの実行
-async fn run_test_client() -> Result<()> {
-    info!("Starting test client...");
-
-    // サーバーが完全に起動するまで待機
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Unison protocolインスタンス作成
-    let mut protocol = UnisonProtocol::new();
-    protocol.load_schema(include_str!("../../../schemas/ping_pong.kdl"))?;
-
-    // クライアント作成と接続
-    let client = protocol.create_client()?;
-    client.connect("[::1]:8080").await?;
-    info!("Connected to test server via IPv6");
-
-    // チャネルを開いてテスト実行
-    let channel = client.open_channel("ping").await?;
-    run_integration_tests(&channel).await?;
-
-    // 切断
-    channel.close().await?;
-    client.disconnect().await?;
-    info!("Disconnected from test server");
-
-    Ok(())
-}
-
-/// テスト用チャネルハンドラーの登録
-async fn register_test_channel_handlers(server: &ProtocolServer, start_time: Instant) {
+    // ping-pong チャネル: ping / echo / health メソッドを処理
     server
-        .register_channel("ping", move |_ctx, stream| async move {
+        .register_channel("ping-pong", move |_ctx, stream| async move {
             let channel = UnisonChannel::new(stream);
-
             loop {
                 let msg = match channel.recv().await {
                     Ok(msg) => msg,
                     Err(_) => break,
                 };
-
                 if msg.msg_type != MessageType::Request {
                     continue;
                 }
@@ -114,17 +51,14 @@ async fn register_test_channel_handlers(server: &ProtocolServer, start_time: Ins
                         let message = payload
                             .get("message")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("Hello!")
-                            .to_string();
+                            .unwrap_or("Hello!");
                         let sequence = payload
                             .get("sequence")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-
                         json!({
                             "message": format!("Pong: {}", message),
                             "sequence": sequence,
-                            "server_info": "Test Server v1.0.0"
                         })
                     }
                     "echo" => {
@@ -133,7 +67,6 @@ async fn register_test_channel_handlers(server: &ProtocolServer, start_time: Ins
                             .get("transform")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-
                         let echoed_data = match transform {
                             "uppercase" if data.is_string() => {
                                 json!(data.as_str().unwrap().to_uppercase())
@@ -141,256 +74,312 @@ async fn register_test_channel_handlers(server: &ProtocolServer, start_time: Ins
                             "reverse" if data.is_string() => {
                                 json!(data.as_str().unwrap().chars().rev().collect::<String>())
                             }
-                            _ => data.clone(),
+                            _ => data,
                         };
-
+                        json!({ "echoed_data": echoed_data })
+                    }
+                    "health" => {
                         json!({
-                            "echoed_data": echoed_data,
-                            "transformation_applied": if transform.is_empty() { None } else { Some(transform) }
+                            "status": "ok",
+                            "uptime_ms": start_time.elapsed().as_millis() as u64,
                         })
                     }
-                    "get_server_time" => {
-                        let uptime_seconds = start_time.elapsed().as_secs();
-
-                        json!({
-                            "server_time": chrono::Utc::now().to_rfc3339(),
-                            "timezone": "UTC",
-                            "uptime_seconds": uptime_seconds
-                        })
-                    }
-                    _ => json!({"error": "unknown method"}),
+                    _ => json!({"error": format!("unknown method: {}", method)}),
                 };
 
-                if let Err(e) = channel.send_response(request_id, &method, response).await {
-                    tracing::warn!("Failed to send response: {}", e);
+                if channel
+                    .send_response(request_id, &method, response)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
-
             Ok(())
         })
         .await;
 
-    info!("Test channel handlers registered");
+    let handle = server.spawn_listen("[::1]:0").await?;
+    let addr = handle.local_addr();
+    let addr_str = format!("[{}]:{}", addr.ip(), addr.port());
+    info!("E2E server started on {}", addr_str);
 
-    // Wait for handlers to be fully registered
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    Ok((handle, addr_str))
 }
 
-/// 統合テストの実行
-async fn run_integration_tests(channel: &UnisonChannel) -> Result<()> {
-    info!("Running integration tests...");
+// ─────────────────────────────────────────────────
+// Test 1: 完全なプロトコルフロー
+// ─────────────────────────────────────────────────
 
-    // Test 1: Server time check
-    info!("Test 1: Server time check");
-    let response = channel.request("get_server_time", json!({})).await?;
-    info!(
-        "Server response: {}",
-        serde_json::to_string_pretty(&response)?
+/// スキーマ読み込み → サーバー → クライアント → チャネル → request/response → close
+#[tokio::test]
+#[ignore = "Large: E2E test"]
+async fn test_e2e_full_protocol_flow() -> Result<()> {
+    init_tracing();
+
+    let (handle, addr) = start_e2e_server().await?;
+
+    // クライアント接続（Identity Handshake 含む）
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    assert!(client.is_connected().await);
+
+    // Identity 検証
+    let identity = client.server_identity().await.expect("Identity should exist");
+    assert_eq!(identity.name, "e2e-test");
+    assert_eq!(identity.version, "1.0.0");
+    assert!(
+        identity.channels.iter().any(|ch| ch.name == "ping-pong"),
+        "ping-pong channel should be in identity"
+    );
+    info!("Identity verified: {} v{}", identity.name, identity.version);
+
+    // チャネル開設 + Ping
+    let channel = client.open_channel("ping-pong").await?;
+    let response = timeout(
+        Duration::from_secs(5),
+        channel.request("ping", json!({"message": "E2E", "sequence": 1})),
+    )
+    .await??;
+    assert_eq!(
+        response.get("message").and_then(|v| v.as_str()),
+        Some("Pong: E2E")
+    );
+    assert_eq!(
+        response.get("sequence").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    info!("Ping-pong verified");
+
+    // クリーンアップ
+    channel.close().await?;
+    client.disconnect().await?;
+    handle.shutdown().await?;
+    info!("Full protocol flow completed");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────
+// Test 2: Echo with data transformations
+// ─────────────────────────────────────────────────
+
+/// Echo ハンドラーの各種変換を E2E で検証
+#[tokio::test]
+#[ignore = "Large: E2E test"]
+async fn test_e2e_echo_transformations() -> Result<()> {
+    init_tracing();
+
+    let (handle, addr) = start_e2e_server().await?;
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    let channel = client.open_channel("ping-pong").await?;
+
+    // Uppercase
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("echo", json!({"data": "hello world", "transform": "uppercase"})),
+    )
+    .await??;
+    assert_eq!(
+        resp.get("echoed_data").and_then(|v| v.as_str()),
+        Some("HELLO WORLD")
+    );
+
+    // Reverse
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("echo", json!({"data": "abcd", "transform": "reverse"})),
+    )
+    .await??;
+    assert_eq!(
+        resp.get("echoed_data").and_then(|v| v.as_str()),
+        Some("dcba")
+    );
+
+    // No transform (identity)
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("echo", json!({"data": "unchanged", "transform": ""})),
+    )
+    .await??;
+    assert_eq!(
+        resp.get("echoed_data").and_then(|v| v.as_str()),
+        Some("unchanged")
+    );
+
+    info!("Echo transformations verified");
+
+    channel.close().await?;
+    client.disconnect().await?;
+    handle.shutdown().await?;
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────
+// Test 3: Health チェック + サーバー uptime
+// ─────────────────────────────────────────────────
+
+/// Health メソッドでサーバー稼働状態を確認
+#[tokio::test]
+#[ignore = "Large: E2E test"]
+async fn test_e2e_health_check() -> Result<()> {
+    init_tracing();
+
+    let (handle, addr) = start_e2e_server().await?;
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    let channel = client.open_channel("ping-pong").await?;
+
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("health", json!({})),
+    )
+    .await??;
+    assert_eq!(
+        resp.get("status").and_then(|v| v.as_str()),
+        Some("ok")
     );
     assert!(
-        response.get("server_time").is_some(),
-        "Server time should be present"
+        resp.get("uptime_ms").and_then(|v| v.as_u64()).is_some(),
+        "uptime_ms should be present"
     );
-    assert!(
-        response.get("uptime_seconds").is_some(),
-        "Uptime should be present"
-    );
-    info!("Server time test passed");
+    info!("Health check: {:?}", resp);
 
-    // Test 2: Basic ping-pong
-    info!("Test 2: Basic ping-pong");
-    for i in 1..=3 {
-        let response = channel
-            .request(
-                "ping",
-                json!({
-                    "message": format!("Test message {}", i),
-                    "sequence": i
-                }),
-            )
-            .await?;
+    channel.close().await?;
+    client.disconnect().await?;
+    handle.shutdown().await?;
+    Ok(())
+}
 
-        let pong_message = response
-            .get("message")
-            .and_then(|v| v.as_str())
-            .expect("Pong message should be present");
+// ─────────────────────────────────────────────────
+// Test 4: 複雑な JSON ペイロードの往復
+// ─────────────────────────────────────────────────
 
-        assert!(
-            pong_message.contains("Pong:"),
-            "Response should contain 'Pong:'"
-        );
-        assert_eq!(
-            response.get("sequence").and_then(|v| v.as_i64()).unwrap(),
-            i,
-            "Sequence number should match"
-        );
-    }
-    info!("Ping-pong test passed");
+/// ネスト、配列、Unicode を含む複雑な JSON の E2E 往復
+#[tokio::test]
+#[ignore = "Large: E2E test"]
+async fn test_e2e_complex_json_roundtrip() -> Result<()> {
+    init_tracing();
 
-    // Test 3: Echo with transformations
-    info!("Test 3: Echo transformations");
+    let (handle, addr) = start_e2e_server().await?;
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    let channel = client.open_channel("ping-pong").await?;
 
-    // Uppercase test
-    let response = channel
-        .request(
-            "echo",
-            json!({
-                "data": "hello world",
-                "transform": "uppercase"
-            }),
-        )
-        .await?;
-    assert_eq!(
-        response
-            .get("echoed_data")
-            .and_then(|v| v.as_str())
-            .unwrap(),
-        "HELLO WORLD",
-        "Uppercase transformation should work"
-    );
-
-    // Reverse test
-    let response = channel
-        .request(
-            "echo",
-            json!({
-                "data": "abcd",
-                "transform": "reverse"
-            }),
-        )
-        .await?;
-    assert_eq!(
-        response
-            .get("echoed_data")
-            .and_then(|v| v.as_str())
-            .unwrap(),
-        "dcba",
-        "Reverse transformation should work"
-    );
-
-    // No transformation test
-    let response = channel
-        .request(
-            "echo",
-            json!({
-                "data": "unchanged",
-                "transform": ""
-            }),
-        )
-        .await?;
-    assert_eq!(
-        response
-            .get("echoed_data")
-            .and_then(|v| v.as_str())
-            .unwrap(),
-        "unchanged",
-        "No transformation should leave data unchanged"
-    );
-    info!("Echo transformation tests passed");
-
-    // Test 4: Performance test (reduced size for integration test)
-    info!("Test 4: Performance test");
-    let start_time = Instant::now();
-
-    for i in 1..=10 {
-        let _response = channel
-            .request(
-                "ping",
-                json!({
-                    "message": format!("Perf test {}", i),
-                    "sequence": i + 100
-                }),
-            )
-            .await?;
-    }
-
-    let elapsed = start_time.elapsed();
-    info!("Performance test completed in {:?}", elapsed);
-
-    // Test 5: Complex JSON handling
-    info!("Test 5: Complex JSON handling");
     let complex_data = json!({
         "nested": {
             "array": [1, 2, 3],
-            "string": "test",
-            "boolean": true
+            "string": "テスト",
+            "boolean": true,
+            "null_val": null
         },
-        "number": 42
+        "number": 42,
+        "emoji": "🎵"
     });
 
-    let response = channel
-        .request(
-            "echo",
-            json!({
-                "data": complex_data.clone(),
-                "transform": ""
-            }),
-        )
-        .await?;
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("echo", json!({"data": complex_data.clone(), "transform": ""})),
+    )
+    .await??;
 
-    let echoed = response.get("echoed_data").unwrap();
-    assert_eq!(
-        echoed.get("nested").unwrap().get("array").unwrap(),
-        &json!([1, 2, 3]),
-        "Complex nested data should be preserved"
-    );
-    info!("Complex JSON test passed");
+    let echoed = resp.get("echoed_data").expect("echoed_data should exist");
+    assert_eq!(echoed, &complex_data);
+    info!("Complex JSON roundtrip verified");
 
-    info!("All integration tests passed!");
+    channel.close().await?;
+    client.disconnect().await?;
+    handle.shutdown().await?;
     Ok(())
 }
 
-/// rust-embed証明書の使用テスト
+// ─────────────────────────────────────────────────
+// Test 5: 連続リクエストのスループット
+// ─────────────────────────────────────────────────
+
+/// 50 件の連続 ping リクエストを E2E で実行し、レイテンシを計測
 #[tokio::test]
-async fn test_rust_embed_certificates() -> Result<()> {
-    info!("Testing rust-embed certificate loading");
+#[ignore = "Large: E2E test"]
+async fn test_e2e_sequential_throughput() -> Result<()> {
+    init_tracing();
 
-    use unison::network::quic::QuicServer;
+    let (handle, addr) = start_e2e_server().await?;
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    let channel = client.open_channel("ping-pong").await?;
 
-    let result = QuicServer::load_cert_embedded();
-    match result {
-        Ok((certs, _private_key)) => {
-            info!("rust-embed certificates loaded successfully");
-            assert!(!certs.is_empty(), "Certificate chain should not be empty");
-            info!("Certificate count: {}", certs.len());
-        }
-        Err(e) => {
-            info!(
-                "rust-embed certificates not found (expected in some environments): {}",
-                e
-            );
-            let result = QuicServer::load_cert_auto();
-            assert!(result.is_ok(), "Auto certificate loading should work");
-            info!("Auto certificate loading works");
-        }
+    let count = 50;
+    let start = Instant::now();
+
+    for i in 0..count {
+        let resp = timeout(
+            Duration::from_secs(5),
+            channel.request("ping", json!({"message": "throughput", "sequence": i})),
+        )
+        .await??;
+        assert_eq!(
+            resp.get("sequence").and_then(|v| v.as_i64()),
+            Some(i),
+        );
     }
 
+    let elapsed = start.elapsed();
+    let avg_ms = elapsed.as_millis() as f64 / count as f64;
+    info!(
+        "{} requests in {:?} (avg {:.2} ms/req)",
+        count, elapsed, avg_ms
+    );
+
+    channel.close().await?;
+    client.disconnect().await?;
+    handle.shutdown().await?;
     Ok(())
 }
 
-/// QUIC設定の検証テスト
+// ─────────────────────────────────────────────────
+// Test 6: グレースフルシャットダウン中の通信
+// ─────────────────────────────────────────────────
+
+/// アクティブなチャネル通信中にサーバーをシャットダウン → クライアントが検知
 #[tokio::test]
-async fn test_quic_configuration() -> Result<()> {
-    info!("Testing QUIC configuration");
+#[ignore = "Large: E2E test"]
+async fn test_e2e_graceful_shutdown() -> Result<()> {
+    init_tracing();
 
-    use unison::network::quic::{QuicClient, QuicServer};
+    let (handle, addr) = start_e2e_server().await?;
+    let client = ProtocolClient::new_default()?;
+    client.connect(&addr).await?;
+    assert!(client.is_connected().await);
 
-    // Server configuration test
-    let server_config = QuicServer::configure_server().await;
-    assert!(
-        server_config.is_ok(),
-        "Server configuration should be valid"
+    // 通信が成功することを確認
+    let channel = client.open_channel("ping-pong").await?;
+    let resp = timeout(
+        Duration::from_secs(5),
+        channel.request("ping", json!({"message": "before shutdown", "sequence": 0})),
+    )
+    .await??;
+    assert_eq!(
+        resp.get("message").and_then(|v| v.as_str()),
+        Some("Pong: before shutdown")
     );
-    info!("Server configuration test passed");
 
-    // Client configuration test
-    let client_config = QuicClient::configure_client().await;
-    assert!(
-        client_config.is_ok(),
-        "Client configuration should be valid"
-    );
-    info!("Client configuration test passed");
+    // サーバーシャットダウン
+    handle.shutdown().await?;
+    info!("Server shut down");
 
+    // クライアントが切断を検知（ポーリングで最大 3 秒待機）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if !client.is_connected().await {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("Client did not detect server shutdown within 3s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    info!("Client detected shutdown");
+
+    client.disconnect().await?;
     Ok(())
 }

@@ -275,8 +275,18 @@ fn test_e2e_full_protocol_flow() { ... }
 すべて `#[ignore = "Medium: requires QUIC runtime"]` 付き。
 `cargo test -- --ignored` で実行。
 
-### Phase 3: Large x E2E
+### Phase 3: Large x E2E ✅
 
-- `quic_integration_test.rs` の整備
-- 実サーバー/クライアント間の完全なプロトコルフロー検証
-- ナイトリー CI ジョブでの定期実行
+`quic_integration_test.rs` を全面改修し 6 テスト:
+
+- 完全なプロトコルフロー（Identity + チャネル + ping/pong）
+- Echo 変換（uppercase / reverse / identity）
+- Health チェック + uptime 検証
+- 複雑 JSON 往復（ネスト・Unicode・emoji・null）
+- 連続リクエストスループット（50 件、レイテンシをログ計測）
+- グレースフルシャットダウン中の通信と切断検知
+
+旧テスト（port 8080 固定 / abort / sleep 待機）を
+`spawn_listen("[::1]:0")` + `ServerHandle::shutdown()` に刷新。
+重複していた cert/config テストは `simple_quic_test.rs` に集約済みのため削除。
+すべて `#[ignore = "Large: E2E test"]` 付き。
