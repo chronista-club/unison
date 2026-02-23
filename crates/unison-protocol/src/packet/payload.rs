@@ -209,7 +209,7 @@ mod tests {
 
         // シリアライズ
         let bytes = payload.to_bytes().unwrap();
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
 
         // デシリアライズ
         let restored = BytesPayload::from_bytes(&bytes).unwrap();
@@ -265,7 +265,7 @@ mod tests {
 
         // ただし、0バイトの場合はfrom_bytesが失敗する可能性があるので、
         // バイト数が0より大きい場合のみデシリアライゼーションをテスト
-        if bytes.len() > 0 {
+        if !bytes.is_empty() {
             let restored = EmptyPayload::from_bytes(&bytes).unwrap();
             assert_eq!(restored, EmptyPayload);
         }

@@ -1,7 +1,4 @@
 use anyhow::Result;
-use serde_json::json;
-use std::time::Duration;
-use tokio::time::timeout;
 use tracing::{Level, info};
 
 /// 簡単なQUIC統合テスト - リモートプロセス版の動作を確認
@@ -112,11 +109,11 @@ async fn test_quic_transport_settings() -> Result<()> {
     use unison::network::quic::{QuicClient, QuicServer};
 
     // Test server transport configuration
-    let server_config = QuicServer::configure_server().await?;
+    let _server_config = QuicServer::configure_server().await?;
     info!("✅ Server transport configuration created");
 
     // Test client transport configuration
-    let client_config = QuicClient::configure_client().await?;
+    let _client_config = QuicClient::configure_client().await?;
     info!("✅ Client transport configuration created");
 
     info!("✅ QUIC transport settings test passed");
@@ -169,8 +166,8 @@ async fn test_performance_optimizations() -> Result<()> {
     use unison::network::quic::{QuicClient, QuicServer};
 
     // Test that configurations are optimized for real-time communication
-    let server_config = QuicServer::configure_server().await?;
-    let client_config = QuicClient::configure_client().await?;
+    let _server_config = QuicServer::configure_server().await?;
+    let _client_config = QuicClient::configure_client().await?;
 
     info!("✅ Performance-optimized configurations created");
     info!("🔧 Server config: QUIC transport with TLS 1.3");

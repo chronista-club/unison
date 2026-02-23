@@ -79,6 +79,6 @@ mod tests {
 
     #[test]
     fn test_agent_client_default() {
-        let _client = AgentClient::default();
+        let _client = AgentClient;
     }
 }

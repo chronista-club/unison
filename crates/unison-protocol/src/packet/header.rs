@@ -88,6 +88,9 @@ impl UnisonPacketHeader {
     /// 現在のプロトコルバージョン
     pub const CURRENT_VERSION: u8 = 0x01;
 
+    /// rkyv シリアライズ後のヘッダーサイズ（バイト）
+    pub const SERIALIZED_SIZE: usize = 56;
+
     /// 新しいヘッダーを作成
     pub fn new(packet_type: PacketType) -> Self {
         Self {
@@ -269,7 +272,7 @@ mod tests {
         // ヘッダーサイズが48バイトであることを確認
         use std::mem::size_of;
         let header_size = size_of::<UnisonPacketHeader>();
-        assert_eq!(header_size, 64, "Header size should be exactly 64 bytes");
+        assert_eq!(header_size, 56, "Header size should be exactly 56 bytes");
     }
 
     #[test]

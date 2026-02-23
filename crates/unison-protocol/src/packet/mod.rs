@@ -168,7 +168,7 @@ where
         let (header, _) = PacketDeserializer::deserialize_header(&self.raw_data)?;
 
         // ヘッダーサイズをスキップしてペイロード部分を取得
-        let payload_start = 48; // ヘッダーサイズ
+        let payload_start = UnisonPacketHeader::SERIALIZED_SIZE;
         let payload_bytes = &self.raw_data[payload_start..];
 
         PacketDeserializer::deserialize_payload_zero_copy::<T>(&header, payload_bytes, buffer)
@@ -280,12 +280,13 @@ pub struct UnisonPacketView<'a> {
 impl<'a> UnisonPacketView<'a> {
     /// Bytesからビューを作成
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, SerializationError> {
-        if bytes.len() < 48 {
+        let header_size = UnisonPacketHeader::SERIALIZED_SIZE;
+        if bytes.len() < header_size {
             return Err(SerializationError::InvalidHeader);
         }
 
         // ヘッダーをパース
-        let header_bytes = &bytes[..48];
+        let header_bytes = &bytes[..header_size];
         let archived_header = rkyv::check_archived_root::<UnisonPacketHeader>(header_bytes)
             .map_err(|e| SerializationError::DeserializationFailed(e.to_string()))?;
         let header: UnisonPacketHeader = archived_header
@@ -293,7 +294,7 @@ impl<'a> UnisonPacketView<'a> {
             .map_err(|_| SerializationError::InvalidHeader)?;
 
         // ペイロード部分を取得
-        let payload_bytes = &bytes[48..];
+        let payload_bytes = &bytes[header_size..];
         let is_compressed = header.is_compressed();
 
         Ok(Self {

@@ -139,12 +139,13 @@ impl PacketDeserializer {
     pub fn deserialize_header(
         bytes: &Bytes,
     ) -> Result<(UnisonPacketHeader, Bytes), SerializationError> {
-        if bytes.len() < 48 {
+        let header_size = UnisonPacketHeader::SERIALIZED_SIZE;
+        if bytes.len() < header_size {
             return Err(SerializationError::InvalidHeader);
         }
 
-        // ヘッダー部分を取得（最初の48バイト）
-        let header_bytes = &bytes[..48];
+        // ヘッダー部分を取得
+        let header_bytes = &bytes[..header_size];
         let header = Self::parse_header(header_bytes)?;
 
         // バージョンチェック
@@ -155,7 +156,7 @@ impl PacketDeserializer {
         }
 
         // ペイロード部分を取得
-        let payload_bytes = bytes.slice(48..);
+        let payload_bytes = bytes.slice(header_size..);
 
         Ok((header, payload_bytes))
     }
@@ -267,7 +268,7 @@ mod tests {
         let large_text = "x".repeat(3000);
         let payload = StringPayload::new(large_text);
 
-        let packet = PacketSerializer::serialize(&mut header, &payload).unwrap();
+        let _packet = PacketSerializer::serialize(&mut header, &payload).unwrap();
 
         assert!(header.is_compressed());
         assert!(header.compressed_length > 0);
