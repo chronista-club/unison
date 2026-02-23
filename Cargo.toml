@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "crates/unison-protocol",
-    "crates/unison-network",
-    "crates/unison-cli", "crates/unison-agent",
+    "crates/unison-agent",
 ]
 resolver = "2"
 

@@ -196,7 +196,6 @@ protocol "my-service" version="1.0.0" {
 ```bash
 cargo run -p unison-agent --example simple_query        # 単発クエリ
 cargo run -p unison-agent --example interactive_chat    # マルチターン会話
-cargo run -p unison-agent --example unison_mcp_demo     # MCP ツールとして公開
 ```
 
 ---
@@ -217,7 +216,7 @@ IPv6 専用設計。アドレスは `[::1]:port` を使う。
 ## ドキュメント
 
 - [コアコンセプト](spec/01-core-concept/SPEC.md) — Everything is a Channel
-- [Unified Channel Protocol](spec/02-protocol-rpc/SPEC.md) — KDL スキーマ、コード生成
+- [Unified Channel Protocol](spec/02-unified-channel/SPEC.md) — KDL スキーマ、コード生成
 - [チャネルガイド](guides/channel-guide.md) — 実践ガイド
 
 ## ライセンス

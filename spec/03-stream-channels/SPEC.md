@@ -634,7 +634,7 @@ WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTrans
 ### 仕様書
 
 - [spec/01: コアコンセプト](../01-core-concept/SPEC.md) - トランスポート層（QUIC）
-- [spec/02: Unified Channel プロトコル](../02-protocol-rpc/SPEC.md) - KDL スキーマとメッセージフロー
+- [spec/02: Unified Channel プロトコル](../02-unified-channel/SPEC.md) - KDL スキーマとメッセージフロー
 
 ### 設計ドキュメント
 

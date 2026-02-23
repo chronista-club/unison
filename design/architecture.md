@@ -32,8 +32,6 @@ unison/
     creo_sync.kdl          -- 実用スキーマ例（5チャネル）
   crates/
     unison-protocol/       -- コアクレート（パーサー、コード生成、ネットワーク）
-    unison-network/        -- ネットワーク層（将来拡張用）
-    unison-cli/            -- CLIツール
     unison-agent/          -- エージェント実装
 ```
 

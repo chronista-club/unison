@@ -420,9 +420,8 @@ pub struct ProtocolMessage {
 
 ### 8.2 証明書管理
 
-1. **外部ファイル**: `assets/certs/cert.pem` + `private_key.der`
-2. **埋め込みアセット**: rust-embed によるバイナリ埋め込み
-3. **自己署名証明書**: rcgen による自動生成（フォールバック）
+1. **埋め込みアセット**: rust-embed によるバイナリ埋め込み（`crates/unison-protocol/assets/certs/`）
+2. **自己署名証明書**: rcgen による自動生成（フォールバック）
 
 ### 8.3 現在の制約
 
@@ -446,7 +445,7 @@ pub struct ProtocolMessage {
 
 ### 仕様書
 
-- [spec/02: Unified Channel プロトコル](../02-protocol-rpc/SPEC.md) -- KDL スキーマとメッセージフロー
+- [spec/02: Unified Channel プロトコル](../02-unified-channel/SPEC.md) -- KDL スキーマとメッセージフロー
 - [spec/03: チャネル仕様](../03-stream-channels/SPEC.md) -- UnisonChannel 仕様
 
 ### 設計ドキュメント
@@ -462,7 +461,6 @@ pub struct ProtocolMessage {
 ### 実装
 
 - [unison-protocol](../../crates/unison-protocol/) -- コアプロトコル実装
-- [unison-network](../../crates/unison-network/) -- ネットワーク層実装
 
 ---
 

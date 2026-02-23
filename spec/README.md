@@ -16,7 +16,7 @@ Unisonプロトコルの正式な要求仕様・機能仕様です。
 | 番号 | 仕様書 | 概要 | ステータス |
 |-----|--------|------|-----------|
 | 01 | [コアネットワーク](01-core-concept/SPEC.md) | QUIC採用、3層アーキテクチャ（Agent/Hub/Root）、ディスカバリー機構 | Draft |
-| 02 | [RPCプロトコル](02-protocol-rpc/SPEC.md) | KDLベースのスキーマ定義、型安全なRPC通信 | Draft |
+| 02 | [Unified Channel](02-unified-channel/SPEC.md) | KDLベースのスキーマ定義、Unified Channel通信 | Draft |
 
 ## 仕様書の構成
 
