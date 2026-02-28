@@ -21,6 +21,73 @@ pub enum ConnectionEvent {
     Disconnected { remote_addr: SocketAddr },
 }
 
+/// [`ProtocolServer::subscribe_connection_events()`] が返す接続イベントレシーバー
+///
+/// `tokio::sync::broadcast::Receiver<ConnectionEvent>` のラッパーで、
+/// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
+/// を透過的にスキップするヘルパーメソッドを提供する。
+pub struct ConnectionEventReceiver {
+    inner: tokio::sync::broadcast::Receiver<ConnectionEvent>,
+}
+
+impl ConnectionEventReceiver {
+    /// 内部の broadcast::Receiver を直接参照する
+    pub fn inner(&mut self) -> &mut tokio::sync::broadcast::Receiver<ConnectionEvent> {
+        &mut self.inner
+    }
+
+    /// 次のイベントを受信する（`broadcast::Receiver::recv()` の委譲）
+    ///
+    /// `Lagged` エラーが発生した場合はそのまま呼び出し元に返す。
+    /// `Lagged` を自動スキップしたい場合は [`recv_skip_lagged()`](Self::recv_skip_lagged) を使用する。
+    pub async fn recv(
+        &mut self,
+    ) -> Result<ConnectionEvent, tokio::sync::broadcast::error::RecvError> {
+        self.inner.recv().await
+    }
+
+    /// 次のイベントを受信する（`Lagged` エラー時は自動スキップして最新から再開）
+    ///
+    /// subscriber の処理が遅延し、バッファの古いイベントが上書きされた場合
+    /// (`RecvError::Lagged`)、エラーを無視して最新のイベントから受信を再開する。
+    ///
+    /// チャネルが閉じられた場合は `RecvError::Closed` を返す。
+    ///
+    /// # 例
+    ///
+    /// ```rust,no_run
+    /// # use unison::ProtocolServer;
+    /// # async fn example(server: &ProtocolServer) {
+    /// let mut rx = server.subscribe_connection_events();
+    /// loop {
+    ///     match rx.recv_skip_lagged().await {
+    ///         Ok(event) => { /* イベント処理 */ }
+    ///         Err(_closed) => break,
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub async fn recv_skip_lagged(
+        &mut self,
+    ) -> Result<ConnectionEvent, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            match self.inner.recv().await {
+                Ok(event) => return Ok(event),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        skipped = n,
+                        "接続イベントの受信が遅延したため {} 件のイベントをスキップし、最新から再開します",
+                        n
+                    );
+                    // ループ継続: 最新のイベントを取得するために再度 recv() を呼ぶ
+                    continue;
+                }
+                Err(e @ tokio::sync::broadcast::error::RecvError::Closed) => return Err(e),
+            }
+        }
+    }
+}
+
 /// チャネルハンドラー型（接続コンテキスト + UnisonStreamを受け取る）
 pub type ChannelHandler = Arc<
     dyn Fn(
@@ -77,6 +144,9 @@ pub struct ProtocolServer {
 
 impl ProtocolServer {
     pub fn new() -> Self {
+        // capacity 64: 接続イベント（Connected/Disconnected）は接続ライフサイクルに
+        // 紐づく低頻度イベントのため、64 件のバッファで十分な余裕がある。
+        // 仮に超過した場合は RecvError::Lagged が返り、recv_skip_lagged() で対処可能。
         let (tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             running: Arc::new(AtomicBool::new(false)),
@@ -148,10 +218,38 @@ impl ProtocolServer {
 
     /// 接続イベントを購読する
     ///
-    /// 接続/切断時に `ConnectionEvent` を受信できる。
+    /// 接続/切断時に [`ConnectionEvent`] を受信できる。
     /// 複数のサブスクライバが同時に購読可能。
-    pub fn subscribe_connection_events(&self) -> tokio::sync::broadcast::Receiver<ConnectionEvent> {
-        self.connection_event_tx.subscribe()
+    ///
+    /// # Lagged エラーについて
+    ///
+    /// 内部は `tokio::sync::broadcast` チャネル（capacity: 64）で実装されている。
+    /// subscriber の消費が追いつかず、バッファが一巡すると古いイベントが破棄され、
+    /// 次回の `recv()` で [`RecvError::Lagged(n)`](tokio::sync::broadcast::error::RecvError::Lagged)
+    /// が返る（`n` はスキップされたイベント数）。
+    ///
+    /// `Lagged` を手動でハンドリングする場合は [`ConnectionEventReceiver::recv()`] を使用し、
+    /// 自動的にスキップして最新から再開したい場合は
+    /// [`ConnectionEventReceiver::recv_skip_lagged()`] を使用する。
+    ///
+    /// # 例
+    ///
+    /// ```rust,no_run
+    /// # use unison::ProtocolServer;
+    /// # async fn example(server: &ProtocolServer) {
+    /// let mut rx = server.subscribe_connection_events();
+    ///
+    /// // Lagged を自動スキップして受信
+    /// match rx.recv_skip_lagged().await {
+    ///     Ok(event) => { /* イベント処理 */ }
+    ///     Err(_closed) => { /* チャネル閉鎖 */ }
+    /// }
+    /// # }
+    /// ```
+    pub fn subscribe_connection_events(&self) -> ConnectionEventReceiver {
+        ConnectionEventReceiver {
+            inner: self.connection_event_tx.subscribe(),
+        }
     }
 
     /// 接続イベントを送信（内部用）
@@ -270,5 +368,102 @@ mod tests {
         // チャネルハンドラーが取得できること
         let handler = server.get_channel_handler("ping").await;
         assert!(handler.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_recv_skip_lagged_normal() {
+        // 通常のイベント受信が正しく動作すること
+        let server = ProtocolServer::new();
+        let mut rx = server.subscribe_connection_events();
+
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        server.emit_connection_event(ConnectionEvent::Disconnected {
+            remote_addr: addr,
+        });
+
+        let event = rx.recv_skip_lagged().await.unwrap();
+        match event {
+            ConnectionEvent::Disconnected { remote_addr } => {
+                assert_eq!(remote_addr, addr);
+            }
+            _ => panic!("Expected Disconnected event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recv_skip_lagged_skips_lagged() {
+        // capacity を超えるイベントを送信し、recv_skip_lagged が Lagged をスキップすること
+        let (tx, _) = tokio::sync::broadcast::channel::<ConnectionEvent>(2);
+
+        let mut rx = ConnectionEventReceiver {
+            inner: tx.subscribe(),
+        };
+
+        let addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+
+        // capacity(2) を超える 4 件を送信 → subscriber は Lagged になる
+        for _ in 0..4 {
+            let _ = tx.send(ConnectionEvent::Disconnected {
+                remote_addr: addr,
+            });
+        }
+
+        // recv_skip_lagged は Lagged をスキップして最新のイベントを返す
+        let event = rx.recv_skip_lagged().await.unwrap();
+        match event {
+            ConnectionEvent::Disconnected { remote_addr } => {
+                assert_eq!(remote_addr, addr);
+            }
+            _ => panic!("Expected Disconnected event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recv_skip_lagged_returns_closed() {
+        // sender がドロップされた場合に Closed が返ること
+        let (tx, _) = tokio::sync::broadcast::channel::<ConnectionEvent>(2);
+
+        let mut rx = ConnectionEventReceiver {
+            inner: tx.subscribe(),
+        };
+
+        // sender をドロップ
+        drop(tx);
+
+        let result = rx.recv_skip_lagged().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            tokio::sync::broadcast::error::RecvError::Closed => {}
+            other => panic!("Expected Closed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recv_delegates_directly() {
+        // recv() は Lagged エラーをそのまま返すこと（スキップしない）
+        let (tx, _) = tokio::sync::broadcast::channel::<ConnectionEvent>(2);
+
+        let mut rx = ConnectionEventReceiver {
+            inner: tx.subscribe(),
+        };
+
+        let addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+
+        // capacity を超える送信
+        for _ in 0..4 {
+            let _ = tx.send(ConnectionEvent::Disconnected {
+                remote_addr: addr,
+            });
+        }
+
+        // recv() は Lagged をそのまま返す
+        let result = rx.recv().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+                assert!(n > 0, "Lagged count should be > 0");
+            }
+            other => panic!("Expected Lagged, got {:?}", other),
+        }
     }
 }

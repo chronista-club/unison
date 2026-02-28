@@ -14,7 +14,7 @@ pub mod server;
 pub use channel::UnisonChannel;
 pub use client::ProtocolClient;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
-pub use server::{ConnectionEvent, ProtocolServer, ServerHandle};
+pub use server::{ConnectionEvent, ConnectionEventReceiver, ProtocolServer, ServerHandle};
 
 /// グローバルなリクエストID生成（モジュール間で一意）
 pub(crate) fn generate_request_id() -> u64 {
