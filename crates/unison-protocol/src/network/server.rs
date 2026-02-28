@@ -380,9 +380,7 @@ mod tests {
         let mut rx = server.subscribe_connection_events();
 
         let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        server.emit_connection_event(ConnectionEvent::Disconnected {
-            remote_addr: addr,
-        });
+        server.emit_connection_event(ConnectionEvent::Disconnected { remote_addr: addr });
 
         let event = rx.recv_skip_lagged().await.unwrap();
         match event {
@@ -406,9 +404,7 @@ mod tests {
 
         // capacity(2) を超える 4 件を送信 → subscriber は Lagged になる
         for _ in 0..4 {
-            let _ = tx.send(ConnectionEvent::Disconnected {
-                remote_addr: addr,
-            });
+            let _ = tx.send(ConnectionEvent::Disconnected { remote_addr: addr });
         }
 
         // recv_skip_lagged は Lagged をスキップして最新のイベントを返す
@@ -454,9 +450,7 @@ mod tests {
 
         // capacity を超える送信
         for _ in 0..4 {
-            let _ = tx.send(ConnectionEvent::Disconnected {
-                remote_addr: addr,
-            });
+            let _ = tx.send(ConnectionEvent::Disconnected { remote_addr: addr });
         }
 
         // recv() は Lagged をそのまま返す
@@ -477,9 +471,7 @@ mod tests {
         let mut rx = server.subscribe_connection_events();
 
         let addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
-        server.emit_connection_event(ConnectionEvent::Disconnected {
-            remote_addr: addr,
-        });
+        server.emit_connection_event(ConnectionEvent::Disconnected { remote_addr: addr });
 
         // inner() で内部の broadcast::Receiver を取得し、直接 recv() する
         let event = rx.inner().recv().await.unwrap();
@@ -504,9 +496,7 @@ mod tests {
 
         // capacity(2) を超える 4 件を送信 → subscriber は Lagged になる
         for _ in 0..4 {
-            let _ = tx.send(ConnectionEvent::Disconnected {
-                remote_addr: addr,
-            });
+            let _ = tx.send(ConnectionEvent::Disconnected { remote_addr: addr });
         }
 
         // recv_skip_lagged で Lagged をスキップして最新イベントを受信
