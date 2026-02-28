@@ -9,7 +9,7 @@ use unison::packet::payload::RkyvPayload;
 use unison::packet::serialization::PacketSerializer;
 use unison::packet::{SerializationError, UnisonPacket};
 
-/// 48バイト未満のバイト列 → from_bytes がエラー
+/// 56バイト未満のバイト列 → from_bytes がエラー
 #[test]
 fn test_integ_frame_too_short() {
     let short_bytes = Bytes::from(vec![0u8; 10]);
@@ -17,7 +17,7 @@ fn test_integ_frame_too_short() {
     assert!(result.is_err());
 }
 
-/// ランダムな48+バイト → ヘッダーパースエラー
+/// ランダムな56+バイト → ヘッダーパースエラー
 #[test]
 fn test_integ_frame_invalid_header() {
     let random_bytes = Bytes::from(vec![0xFFu8; 100]);

@@ -334,7 +334,7 @@ mod tests {
         let payload = StringPayload::from_string("Test packet");
         let packet = UnisonPacket::new(payload.clone()).unwrap();
 
-        assert!(packet.size() > 48);
+        assert!(packet.size() > UnisonPacketHeader::SERIALIZED_SIZE);
 
         let header = packet.header().unwrap();
         assert_eq!(header.packet_type(), PacketType::Data);

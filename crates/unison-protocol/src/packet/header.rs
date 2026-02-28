@@ -49,7 +49,7 @@ impl From<PacketType> for u8 {
 
 /// UnisonPacketのヘッダー構造
 ///
-/// 固定長48バイトのヘッダーで、パケットのメタデータを格納します。
+/// 固定長56バイトのヘッダーで、パケットのメタデータを格納します。
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub struct UnisonPacketHeader {
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        // ヘッダーサイズが48バイトであることを確認
+        // ヘッダーサイズが56バイトであることを確認
         use std::mem::size_of;
         let header_size = size_of::<UnisonPacketHeader>();
         assert_eq!(header_size, 56, "Header size should be exactly 56 bytes");
@@ -296,6 +296,23 @@ mod tests {
         assert!(header.is_response());
         assert!(!header.is_oneway());
         assert_eq!(header.response_to, 123);
+    }
+
+    #[test]
+    fn test_serialized_size_matches_rkyv() {
+        // SERIALIZED_SIZE 定数が rkyv の実際のシリアライズサイズと一致することを検証
+        // フィールド追加時にこのテストが失敗し、定数の更新漏れを防ぐ
+        let header = UnisonPacketHeader::new(PacketType::Data);
+        let serialized = rkyv::to_bytes::<_, 256>(&header)
+            .expect("ヘッダーのシリアライズに失敗");
+        assert_eq!(
+            serialized.len(),
+            UnisonPacketHeader::SERIALIZED_SIZE,
+            "SERIALIZED_SIZE ({}) が rkyv シリアライズ結果のサイズ ({}) と一致しません。\
+             ヘッダー構造体にフィールドが追加された場合は SERIALIZED_SIZE 定数を更新してください。",
+            UnisonPacketHeader::SERIALIZED_SIZE,
+            serialized.len(),
+        );
     }
 
     #[test]
