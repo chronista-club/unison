@@ -466,4 +466,80 @@ mod tests {
             other => panic!("Expected Lagged, got {:?}", other),
         }
     }
+
+    #[tokio::test]
+    async fn test_inner_access() {
+        // inner() 経由で broadcast::Receiver に直接アクセスして recv() できること
+        let server = ProtocolServer::new();
+        let mut rx = server.subscribe_connection_events();
+
+        let addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+        server.emit_connection_event(ConnectionEvent::Disconnected {
+            remote_addr: addr,
+        });
+
+        // inner() で内部の broadcast::Receiver を取得し、直接 recv() する
+        let event = rx.inner().recv().await.unwrap();
+        match event {
+            ConnectionEvent::Disconnected { remote_addr } => {
+                assert_eq!(remote_addr, addr);
+            }
+            _ => panic!("Expected Disconnected event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lagged_skip_then_new_event() {
+        // Lagged → スキップ → 新規イベント正常受信の連続フローテスト
+        let (tx, _) = tokio::sync::broadcast::channel::<ConnectionEvent>(2);
+
+        let mut rx = ConnectionEventReceiver {
+            inner: tx.subscribe(),
+        };
+
+        let addr: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+
+        // capacity(2) を超える 4 件を送信 → subscriber は Lagged になる
+        for _ in 0..4 {
+            let _ = tx.send(ConnectionEvent::Disconnected {
+                remote_addr: addr,
+            });
+        }
+
+        // recv_skip_lagged で Lagged をスキップして最新イベントを受信
+        let event = rx.recv_skip_lagged().await.unwrap();
+        match &event {
+            ConnectionEvent::Disconnected { remote_addr } => {
+                assert_eq!(*remote_addr, addr);
+            }
+            _ => panic!("Expected Disconnected event after lagged skip"),
+        }
+
+        // バッファに残っているイベントを消費
+        // capacity 2 で 4 件送信後にスキップ → 残り 1 件が取得可能な場合がある
+        while let Ok(_) = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            rx.recv_skip_lagged(),
+        )
+        .await
+        {
+            // バッファ内の残イベントを消費
+        }
+
+        // Lagged 回復後に新しいイベントを送信
+        let new_addr: SocketAddr = "127.0.0.1:7003".parse().unwrap();
+        let _ = tx.send(ConnectionEvent::Connected {
+            remote_addr: new_addr,
+            context: Arc::new(super::super::context::ConnectionContext::new()),
+        });
+
+        // 新しいイベントが recv_skip_lagged で正常に受信できること
+        let new_event = rx.recv_skip_lagged().await.unwrap();
+        match new_event {
+            ConnectionEvent::Connected { remote_addr, .. } => {
+                assert_eq!(remote_addr, new_addr);
+            }
+            _ => panic!("Expected Connected event for new address"),
+        }
+    }
 }
