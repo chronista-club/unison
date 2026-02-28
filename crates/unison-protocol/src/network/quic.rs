@@ -655,22 +655,28 @@ async fn handle_connection(
     ctx.set_identity(identity.clone()).await;
 
     let identity_msg = identity.to_protocol_message();
-    if let Ok(frame) = identity_msg.into_frame() {
-        let frame_bytes = frame.to_bytes();
-        match connection.open_bi().await {
-            Ok((mut send_stream, _recv_stream)) => {
-                if let Err(e) =
-                    write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes).await
-                {
-                    warn!("Failed to send identity: {}", e);
-                } else {
-                    let _ = send_stream.finish();
-                    info!("Identity sent to client");
+    match identity_msg.into_frame() {
+        Ok(frame) => {
+            let frame_bytes = frame.to_bytes();
+            match connection.open_bi().await {
+                Ok((mut send_stream, _recv_stream)) => {
+                    if let Err(e) =
+                        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes)
+                            .await
+                    {
+                        warn!("Failed to send identity: {}", e);
+                    } else {
+                        let _ = send_stream.finish();
+                        info!("Identity sent to client");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to open identity stream: {}", e);
                 }
             }
-            Err(e) => {
-                warn!("Failed to open identity stream: {}", e);
-            }
+        }
+        Err(e) => {
+            warn!("Failed to serialize identity frame: {}", e);
         }
     }
 
