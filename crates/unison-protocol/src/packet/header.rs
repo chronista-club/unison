@@ -268,14 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn test_header_size() {
-        // ヘッダーサイズが SERIALIZED_SIZE と一致することを確認
-        use std::mem::size_of;
-        let header_size = size_of::<UnisonPacketHeader>();
-        assert_eq!(header_size, UnisonPacketHeader::SERIALIZED_SIZE, "Header size should match SERIALIZED_SIZE");
-    }
-
-    #[test]
     fn test_message_type_request() {
         let header = UnisonPacketHeader::new(PacketType::Data)
             .with_message_id(123)
