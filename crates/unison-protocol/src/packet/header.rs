@@ -295,8 +295,7 @@ mod tests {
         // SERIALIZED_SIZE 定数が rkyv の実際のシリアライズサイズと一致することを検証
         // フィールド追加時にこのテストが失敗し、定数の更新漏れを防ぐ
         let header = UnisonPacketHeader::new(PacketType::Data);
-        let serialized = rkyv::to_bytes::<_, 256>(&header)
-            .expect("ヘッダーのシリアライズに失敗");
+        let serialized = rkyv::to_bytes::<_, 256>(&header).expect("ヘッダーのシリアライズに失敗");
         assert_eq!(
             serialized.len(),
             UnisonPacketHeader::SERIALIZED_SIZE,
