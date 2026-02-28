@@ -647,7 +647,7 @@ WebAssembly 環境では QUIC が利用できないため、WebSocket / WebTrans
 
 ### KDL スキーマ
 
-- [creo_sync.kdl](../../schemas/creo_sync.kdl) - Creo Sync プロトコルのスキーマ定義
+- creo_sync.kdl - Creo Sync プロトコルのスキーマ定義（正規場所: `creo-memories/protocols/creo_sync.kdl`）
 
 ### 実装
 
