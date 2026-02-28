@@ -1007,3 +1007,132 @@ impl UnisonStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::MessageType;
+
+    /// ヘルパー: テスト用の ProtocolMessage を作成
+    fn make_message(method: &str) -> ProtocolMessage {
+        ProtocolMessage {
+            id: 1,
+            method: method.to_string(),
+            msg_type: MessageType::Event,
+            payload: "{}".to_string(),
+        }
+    }
+
+    /// identity メッセージ ("__identity") が oneshot チャネルにルーティングされ、
+    /// mpsc チャネルには流れないことを検証する。
+    #[tokio::test]
+    async fn test_identity_message_routed_to_oneshot() {
+        let (mpsc_tx, mut mpsc_rx) = mpsc::unbounded_channel::<ProtocolMessage>();
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        let identity_tx = Arc::new(Mutex::new(Some(id_tx)));
+
+        let msg = make_message("__identity");
+
+        // client_accept_bi_loop 内の分岐ロジックを再現
+        if msg.method == "__identity" {
+            if let Some(tx) = identity_tx.lock().await.take() {
+                let _ = tx.send(msg);
+            }
+        } else {
+            let _ = mpsc_tx.send(msg);
+        }
+
+        // oneshot で受信できること
+        let received = id_rx.await.expect("oneshot から受信できるべき");
+        assert_eq!(received.method, "__identity");
+
+        // mpsc は空のままであること
+        assert!(
+            mpsc_rx.try_recv().is_err(),
+            "mpsc チャネルは空のままであるべき"
+        );
+    }
+
+    /// 非 identity メッセージ ("__channel:test") が mpsc チャネルにルーティングされることを検証する。
+    #[tokio::test]
+    async fn test_non_identity_message_routed_to_mpsc() {
+        let (mpsc_tx, mut mpsc_rx) = mpsc::unbounded_channel::<ProtocolMessage>();
+        let (id_tx, _id_rx) = oneshot::channel::<ProtocolMessage>();
+        let identity_tx = Arc::new(Mutex::new(Some(id_tx)));
+
+        let msg = make_message("__channel:test");
+
+        // client_accept_bi_loop 内の分岐ロジックを再現
+        if msg.method == "__identity" {
+            if let Some(tx) = identity_tx.lock().await.take() {
+                let _ = tx.send(msg);
+            }
+        } else {
+            let _ = mpsc_tx.send(msg);
+        }
+
+        // mpsc で受信できること
+        let received = mpsc_rx.try_recv().expect("mpsc から受信できるべき");
+        assert_eq!(received.method, "__channel:test");
+    }
+
+    /// receive_identity() が指定時間内に応答がない場合タイムアウトエラーを返すことを検証する。
+    #[tokio::test]
+    async fn test_receive_identity_timeout() {
+        let client = QuicClient::new().expect("QuicClient::new() は成功するべき");
+
+        // oneshot の rx をセット（sender は保持するが送信しない）
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        *client.identity_rx.lock().await = Some(id_rx);
+
+        let result = client
+            .receive_identity(std::time::Duration::from_millis(50))
+            .await;
+
+        assert!(result.is_err(), "タイムアウトでエラーになるべき");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "タイムアウトエラーメッセージを含むべき: {}",
+            err_msg
+        );
+
+        // id_tx を drop して oneshot の sender 側を解放
+        drop(id_tx);
+    }
+
+    /// receive_identity() を2回呼んだとき、2回目は "already consumed" エラーを返すことを検証する。
+    #[tokio::test]
+    async fn test_receive_identity_already_consumed() {
+        let client = QuicClient::new().expect("QuicClient::new() は成功するべき");
+
+        // oneshot チャネルを作成し、即座にメッセージを送信
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        *client.identity_rx.lock().await = Some(id_rx);
+
+        let msg = make_message("__identity");
+        id_tx.send(msg).expect("oneshot 送信は成功するべき");
+
+        // 1回目: 正常に受信
+        let first = client
+            .receive_identity(std::time::Duration::from_millis(100))
+            .await;
+        assert!(first.is_ok(), "1回目の receive_identity は成功するべき");
+        assert_eq!(first.unwrap().method, "__identity");
+
+        // 2回目: already consumed エラー
+        let second = client
+            .receive_identity(std::time::Duration::from_millis(100))
+            .await;
+        assert!(
+            second.is_err(),
+            "2回目の receive_identity はエラーになるべき"
+        );
+        let err_msg = second.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already consumed"),
+            "already consumed エラーメッセージを含むべき: {}",
+            err_msg
+        );
+    }
+}
