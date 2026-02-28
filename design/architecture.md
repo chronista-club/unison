@@ -79,7 +79,7 @@ crates/unison-protocol/src/
     typescript.rs          -- TypeScriptGenerator
   packet/
     mod.rs                 -- UnisonPacket、UnisonPacketBuilder、UnisonPacketView
-    header.rs              -- UnisonPacketHeader (48 bytes)、PacketType
+    header.rs              -- UnisonPacketHeader (56 bytes)、PacketType
     flags.rs               -- PacketFlags ビットフラグ
     payload.rs             -- Payloadable trait、各種ペイロード型
     config.rs              -- PacketConfig、CompressionConfig
@@ -145,7 +145,7 @@ graph TB
 | ファイル | 責務 |
 |---------|------|
 | `mod.rs` | `UnisonPacket<T>` -- ジェネリックフレーム構造体。`Bytes`で生データ保持、遅延デシリアライズ |
-| `header.rs` | `UnisonPacketHeader` -- 48バイト固定長ヘッダー。version, packet_type, flags, lengths, IDs |
+| `header.rs` | `UnisonPacketHeader` -- 56バイト固定長ヘッダー。version, packet_type, flags, lengths, IDs |
 | `flags.rs` | `PacketFlags` -- ビットフラグ（COMPRESSED, PRIORITY_HIGH, REQUIRES_ACK等） |
 | `payload.rs` | `Payloadable` trait + ペイロード型: `StringPayload`, `BytesPayload`, `JsonPayload`, `RkyvPayload<T>`, `EmptyPayload` |
 | `config.rs` | `PacketConfig` -- 最大ペイロードサイズ、圧縮設定 |

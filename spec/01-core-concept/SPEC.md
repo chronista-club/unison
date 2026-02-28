@@ -359,7 +359,7 @@ graph TB
     subgraph "UnisonPacket"
         direction TB
 
-        HEADER["UnisonPacketHeader<br/>48 bytes (rkyv serialized)"]
+        HEADER["UnisonPacketHeader<br/>56 bytes (rkyv serialized)"]
         PAYLOAD["Payload<br/>可変長 (rkyv serialized, zstd 圧縮可)"]
     end
 

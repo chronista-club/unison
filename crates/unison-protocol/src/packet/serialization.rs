@@ -258,7 +258,7 @@ mod tests {
 
         assert!(!header.is_compressed());
         assert_eq!(header.compressed_length, 0);
-        assert!(packet.len() > 64); // ヘッダー + ペイロード
+        assert!(packet.len() > UnisonPacketHeader::SERIALIZED_SIZE); // ヘッダー + ペイロード
     }
 
     #[test]
