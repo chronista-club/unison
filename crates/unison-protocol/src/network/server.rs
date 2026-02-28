@@ -70,16 +70,19 @@ impl ConnectionEventReceiver {
     pub async fn recv_skip_lagged(
         &mut self,
     ) -> Result<ConnectionEvent, tokio::sync::broadcast::error::RecvError> {
+        let mut total_skipped: u64 = 0;
         loop {
             match self.inner.recv().await {
                 Ok(event) => return Ok(event),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    total_skipped += n;
                     tracing::warn!(
                         skipped = n,
-                        "接続イベントの受信が遅延したため {} 件のイベントをスキップし、最新から再開します",
-                        n
+                        total_skipped,
+                        "接続イベントが {} 件遅延、スキップして最新から再開（累計: {} 件）",
+                        n,
+                        total_skipped
                     );
-                    // ループ継続: 最新のイベントを取得するために再度 recv() を呼ぶ
                     continue;
                 }
                 Err(e @ tokio::sync::broadcast::error::RecvError::Closed) => return Err(e),
@@ -517,14 +520,7 @@ mod tests {
 
         // バッファに残っているイベントを消費
         // capacity 2 で 4 件送信後にスキップ → 残り 1 件が取得可能な場合がある
-        while let Ok(_) = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            rx.recv_skip_lagged(),
-        )
-        .await
-        {
-            // バッファ内の残イベントを消費
-        }
+        while rx.inner().try_recv().is_ok() {}
 
         // Lagged 回復後に新しいイベントを送信
         let new_addr: SocketAddr = "127.0.0.1:7003".parse().unwrap();
