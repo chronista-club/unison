@@ -2,6 +2,7 @@ mod common;
 
 use unison::network::MessageType;
 use unison::network::identity::*;
+use unison::packet::UnisonPacketHeader;
 
 #[test]
 fn test_integ_identity_to_protocol_message_round_trip() {
@@ -45,7 +46,7 @@ async fn test_integ_identity_build_and_frame() {
     // フレーム化してバイト列が生成できること
     let frame = msg.into_frame().unwrap();
     let bytes = frame.to_bytes();
-    assert!(bytes.len() > 48); // ヘッダー(48) + ペイロード
+    assert!(bytes.len() > UnisonPacketHeader::SERIALIZED_SIZE); // ヘッダー + ペイロード
 }
 
 #[test]

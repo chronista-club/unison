@@ -269,10 +269,10 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        // ヘッダーサイズが56バイトであることを確認
+        // ヘッダーサイズが SERIALIZED_SIZE と一致することを確認
         use std::mem::size_of;
         let header_size = size_of::<UnisonPacketHeader>();
-        assert_eq!(header_size, 56, "Header size should be exactly 56 bytes");
+        assert_eq!(header_size, UnisonPacketHeader::SERIALIZED_SIZE, "Header size should match SERIALIZED_SIZE");
     }
 
     #[test]
