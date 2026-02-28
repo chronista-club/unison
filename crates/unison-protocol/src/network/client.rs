@@ -98,9 +98,16 @@ impl ProtocolClient {
     }
 
     /// 接続後にサーバーからIdentityを受信する
+    ///
+    /// Identity 専用の oneshot チャネルから受信するため、
+    /// 他のメッセージが先に到着しても影響を受けない。
     async fn receive_identity(&self) -> Result<ServerIdentity, NetworkError> {
-        let response =
-            self.transport.receive().await.map_err(|e| {
+        let timeout_duration = std::time::Duration::from_secs(10);
+        let response = self
+            .transport
+            .receive_identity(timeout_duration)
+            .await
+            .map_err(|e| {
                 NetworkError::Protocol(format!("Failed to receive identity: {}", e))
             })?;
 
