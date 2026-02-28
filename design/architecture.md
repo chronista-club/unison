@@ -28,8 +28,7 @@ Unison ProtocolはCargoワークスペースとして構成され、プロトコ
 ```
 unison/
   Cargo.toml              -- ワークスペースルート (edition = 2024, rust-version = 1.93)
-  schemas/                 -- KDLプロトコル定義
-    creo_sync.kdl          -- 実用スキーマ例（5チャネル）
+  schemas/                 -- KDLプロトコル定義（テスト用）
   crates/
     unison-protocol/       -- コアクレート（パーサー、コード生成、ネットワーク）
     unison-agent/          -- エージェント実装

@@ -6,7 +6,7 @@ use unison::prelude::*;
 fn test_creo_sync_parse_and_generate() {
     let schema = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/creo_sync.kdl"
+        "/tests/fixtures/creo_sync.kdl"
     ))
     .unwrap();
     let parser = SchemaParser::new();
@@ -51,7 +51,7 @@ fn test_creo_sync_parse_and_generate() {
 fn test_creo_sync_channel_types() {
     let schema = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/creo_sync.kdl"
+        "/tests/fixtures/creo_sync.kdl"
     ))
     .unwrap();
     let parser = SchemaParser::new();

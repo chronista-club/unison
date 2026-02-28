@@ -37,7 +37,7 @@ fn test_integ_ping_pong_full_pipeline() {
 fn test_integ_creo_sync_full_pipeline() {
     let schema = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/creo_sync.kdl"
+        "/tests/fixtures/creo_sync.kdl"
     ))
     .unwrap();
 

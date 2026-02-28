@@ -10,7 +10,7 @@ use unison::prelude::*;
 fn test_e2e_connection_builder_generation() {
     let schema = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/creo_sync.kdl"
+        "/tests/fixtures/creo_sync.kdl"
     ))
     .unwrap();
 
