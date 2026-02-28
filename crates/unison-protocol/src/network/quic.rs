@@ -611,7 +611,9 @@ async fn client_accept_bi_loop(
                                     if let Some(id_tx) = identity_tx.lock().await.take() {
                                         let _ = id_tx.send(message);
                                     } else {
-                                        warn!("Identity oneshot already consumed, dropping identity message");
+                                        warn!(
+                                            "Identity oneshot already consumed, dropping identity message"
+                                        );
                                     }
                                 } else {
                                     // それ以外は既存の mpsc チャネルに送信
@@ -661,8 +663,7 @@ async fn handle_connection(
             match connection.open_bi().await {
                 Ok((mut send_stream, _recv_stream)) => {
                     if let Err(e) =
-                        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes)
-                            .await
+                        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes).await
                     {
                         warn!("Failed to send identity: {}", e);
                     } else {
