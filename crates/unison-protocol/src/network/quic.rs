@@ -8,7 +8,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use super::{
@@ -191,6 +191,10 @@ pub struct QuicClient {
     connection: Arc<RwLock<Option<Connection>>>,
     rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<ProtocolMessage>>>>,
     tx: mpsc::UnboundedSender<ProtocolMessage>,
+    /// Identity handshake 専用の oneshot チャネル（受信側）
+    identity_rx: Arc<Mutex<Option<oneshot::Receiver<ProtocolMessage>>>>,
+    /// Identity handshake 専用の oneshot チャネル（送信側、accept_bi_loop に渡す）
+    identity_tx: Arc<Mutex<Option<oneshot::Sender<ProtocolMessage>>>>,
     /// レスポンス受信タスクのハンドルを管理
     response_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -203,6 +207,8 @@ impl QuicClient {
             connection: Arc::new(RwLock::new(None)),
             rx: Arc::new(RwLock::new(Some(rx))),
             tx,
+            identity_rx: Arc::new(Mutex::new(None)),
+            identity_tx: Arc::new(Mutex::new(None)),
             response_tasks: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -262,6 +268,24 @@ impl QuicClient {
         }
     }
 
+    /// Identity 専用チャネルから identity メッセージを受信する（タイムアウト付き）
+    pub async fn receive_identity(
+        &self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<ProtocolMessage> {
+        let rx = self
+            .identity_rx
+            .lock()
+            .await
+            .take()
+            .context("Identity receiver not available (already consumed or not connected)")?;
+
+        tokio::time::timeout(timeout_duration, rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("Identity handshake timed out"))?
+            .map_err(|_| anyhow::anyhow!("Identity sender dropped without sending"))
+    }
+
     pub async fn connect(&self, url: &str) -> Result<()> {
         // Parse URL (IPv6 only)
         let addr = Self::parse_server_address(url)?;
@@ -288,10 +312,16 @@ impl QuicClient {
         let connection_for_loop = connection.clone();
         *self.connection.write().await = Some(connection);
 
+        // Identity 専用の oneshot チャネルを作成
+        let (id_tx, id_rx) = oneshot::channel();
+        *self.identity_tx.lock().await = Some(id_tx);
+        *self.identity_rx.lock().await = Some(id_rx);
+
         // サーバー発信ストリームを受け付けるバックグラウンドタスクを起動
         let tx = self.tx.clone();
+        let identity_tx = self.identity_tx.clone();
         let task = tokio::spawn(async move {
-            client_accept_bi_loop(connection_for_loop, tx).await;
+            client_accept_bi_loop(connection_for_loop, tx, identity_tx).await;
         });
         self.response_tasks.lock().await.push(task);
 
@@ -558,19 +588,37 @@ impl QuicServer {
 /// クライアント側: サーバー発信の双方向ストリームを受け付けるループ
 ///
 /// サーバーが `connection.open_bi()` で開いたストリーム（Identity 送信等）を
-/// `accept_bi()` で受信し、ProtocolMessage に変換して tx チャネルに送る。
-async fn client_accept_bi_loop(connection: Connection, tx: mpsc::UnboundedSender<ProtocolMessage>) {
+/// `accept_bi()` で受信し、ProtocolMessage に変換する。
+/// `__identity` メッセージは専用の oneshot チャネルに送り、それ以外は既存の mpsc に送る。
+async fn client_accept_bi_loop(
+    connection: Connection,
+    tx: mpsc::UnboundedSender<ProtocolMessage>,
+    identity_tx: Arc<Mutex<Option<oneshot::Sender<ProtocolMessage>>>>,
+) {
     loop {
         match connection.accept_bi().await {
             Ok((_send_stream, mut recv_stream)) => {
                 let tx = tx.clone();
+                let identity_tx = identity_tx.clone();
                 tokio::spawn(async move {
                     match read_typed_frame(&mut recv_stream).await {
                         Ok((FRAME_TYPE_PROTOCOL, frame_bytes)) => {
                             if let Ok(frame) = ProtocolFrame::from_bytes(&frame_bytes)
                                 && let Ok(message) = ProtocolMessage::from_frame(&frame)
                             {
-                                let _ = tx.send(message);
+                                if message.method == "__identity" {
+                                    // Identity メッセージは専用 oneshot チャネルに送信
+                                    if let Some(id_tx) = identity_tx.lock().await.take() {
+                                        let _ = id_tx.send(message);
+                                    } else {
+                                        warn!(
+                                            "Identity oneshot already consumed, dropping identity message"
+                                        );
+                                    }
+                                } else {
+                                    // それ以外は既存の mpsc チャネルに送信
+                                    let _ = tx.send(message);
+                                }
                             }
                         }
                         Ok((frame_type, _)) => {
@@ -609,22 +657,27 @@ async fn handle_connection(
     ctx.set_identity(identity.clone()).await;
 
     let identity_msg = identity.to_protocol_message();
-    if let Ok(frame) = identity_msg.into_frame() {
-        let frame_bytes = frame.to_bytes();
-        match connection.open_bi().await {
-            Ok((mut send_stream, _recv_stream)) => {
-                if let Err(e) =
-                    write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes).await
-                {
-                    warn!("Failed to send identity: {}", e);
-                } else {
-                    let _ = send_stream.finish();
-                    info!("Identity sent to client");
+    match identity_msg.into_frame() {
+        Ok(frame) => {
+            let frame_bytes = frame.to_bytes();
+            match connection.open_bi().await {
+                Ok((mut send_stream, _recv_stream)) => {
+                    if let Err(e) =
+                        write_typed_frame(&mut send_stream, FRAME_TYPE_PROTOCOL, &frame_bytes).await
+                    {
+                        warn!("Failed to send identity: {}", e);
+                    } else {
+                        let _ = send_stream.finish();
+                        info!("Identity sent to client");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to open identity stream: {}", e);
                 }
             }
-            Err(e) => {
-                warn!("Failed to open identity stream: {}", e);
-            }
+        }
+        Err(e) => {
+            warn!("Failed to serialize identity frame: {}", e);
         }
     }
 
@@ -959,5 +1012,134 @@ impl UnisonStream {
                 "Receive stream is closed".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::MessageType;
+
+    /// ヘルパー: テスト用の ProtocolMessage を作成
+    fn make_message(method: &str) -> ProtocolMessage {
+        ProtocolMessage {
+            id: 1,
+            method: method.to_string(),
+            msg_type: MessageType::Event,
+            payload: "{}".to_string(),
+        }
+    }
+
+    /// identity メッセージ ("__identity") が oneshot チャネルにルーティングされ、
+    /// mpsc チャネルには流れないことを検証する。
+    #[tokio::test]
+    async fn test_identity_message_routed_to_oneshot() {
+        let (mpsc_tx, mut mpsc_rx) = mpsc::unbounded_channel::<ProtocolMessage>();
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        let identity_tx = Arc::new(Mutex::new(Some(id_tx)));
+
+        let msg = make_message("__identity");
+
+        // client_accept_bi_loop 内の分岐ロジックを再現
+        if msg.method == "__identity" {
+            if let Some(tx) = identity_tx.lock().await.take() {
+                let _ = tx.send(msg);
+            }
+        } else {
+            let _ = mpsc_tx.send(msg);
+        }
+
+        // oneshot で受信できること
+        let received = id_rx.await.expect("oneshot から受信できるべき");
+        assert_eq!(received.method, "__identity");
+
+        // mpsc は空のままであること
+        assert!(
+            mpsc_rx.try_recv().is_err(),
+            "mpsc チャネルは空のままであるべき"
+        );
+    }
+
+    /// 非 identity メッセージ ("__channel:test") が mpsc チャネルにルーティングされることを検証する。
+    #[tokio::test]
+    async fn test_non_identity_message_routed_to_mpsc() {
+        let (mpsc_tx, mut mpsc_rx) = mpsc::unbounded_channel::<ProtocolMessage>();
+        let (id_tx, _id_rx) = oneshot::channel::<ProtocolMessage>();
+        let identity_tx = Arc::new(Mutex::new(Some(id_tx)));
+
+        let msg = make_message("__channel:test");
+
+        // client_accept_bi_loop 内の分岐ロジックを再現
+        if msg.method == "__identity" {
+            if let Some(tx) = identity_tx.lock().await.take() {
+                let _ = tx.send(msg);
+            }
+        } else {
+            let _ = mpsc_tx.send(msg);
+        }
+
+        // mpsc で受信できること
+        let received = mpsc_rx.try_recv().expect("mpsc から受信できるべき");
+        assert_eq!(received.method, "__channel:test");
+    }
+
+    /// receive_identity() が指定時間内に応答がない場合タイムアウトエラーを返すことを検証する。
+    #[tokio::test]
+    async fn test_receive_identity_timeout() {
+        let client = QuicClient::new().expect("QuicClient::new() は成功するべき");
+
+        // oneshot の rx をセット（sender は保持するが送信しない）
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        *client.identity_rx.lock().await = Some(id_rx);
+
+        let result = client
+            .receive_identity(std::time::Duration::from_millis(50))
+            .await;
+
+        assert!(result.is_err(), "タイムアウトでエラーになるべき");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "タイムアウトエラーメッセージを含むべき: {}",
+            err_msg
+        );
+
+        // id_tx を drop して oneshot の sender 側を解放
+        drop(id_tx);
+    }
+
+    /// receive_identity() を2回呼んだとき、2回目は "already consumed" エラーを返すことを検証する。
+    #[tokio::test]
+    async fn test_receive_identity_already_consumed() {
+        let client = QuicClient::new().expect("QuicClient::new() は成功するべき");
+
+        // oneshot チャネルを作成し、即座にメッセージを送信
+        let (id_tx, id_rx) = oneshot::channel::<ProtocolMessage>();
+        *client.identity_rx.lock().await = Some(id_rx);
+
+        let msg = make_message("__identity");
+        id_tx.send(msg).expect("oneshot 送信は成功するべき");
+
+        // 1回目: 正常に受信
+        let first = client
+            .receive_identity(std::time::Duration::from_millis(100))
+            .await;
+        assert!(first.is_ok(), "1回目の receive_identity は成功するべき");
+        assert_eq!(first.unwrap().method, "__identity");
+
+        // 2回目: already consumed エラー
+        let second = client
+            .receive_identity(std::time::Duration::from_millis(100))
+            .await;
+        assert!(
+            second.is_err(),
+            "2回目の receive_identity はエラーになるべき"
+        );
+        let err_msg = second.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already consumed"),
+            "already consumed エラーメッセージを含むべき: {}",
+            err_msg
+        );
     }
 }

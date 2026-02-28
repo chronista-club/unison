@@ -98,23 +98,26 @@ impl ProtocolClient {
     }
 
     /// 接続後にサーバーからIdentityを受信する
+    ///
+    /// Identity 専用の oneshot チャネルから受信するため、
+    /// 他のメッセージが先に到着しても影響を受けない。
     async fn receive_identity(&self) -> Result<ServerIdentity, NetworkError> {
-        let response =
-            self.transport.receive().await.map_err(|e| {
-                NetworkError::Protocol(format!("Failed to receive identity: {}", e))
-            })?;
+        let response = self
+            .transport
+            .receive_identity(std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| NetworkError::Protocol(format!("Failed to receive identity: {}", e)))?;
 
-        if response.method == "__identity" {
-            let identity = ServerIdentity::from_protocol_message(&response)
-                .map_err(|e| NetworkError::Protocol(format!("Failed to parse identity: {}", e)))?;
-            self.context.set_identity(identity.clone()).await;
-            Ok(identity)
-        } else {
-            Err(NetworkError::Protocol(format!(
-                "Expected identity message, got method: {}",
-                response.method
-            )))
-        }
+        // oneshot に送られるのは常に __identity のみ（client_accept_bi_loop で振り分け済み）
+        debug_assert_eq!(
+            response.method, "__identity",
+            "oneshot routing invariant violated"
+        );
+
+        let identity = ServerIdentity::from_protocol_message(&response)
+            .map_err(|e| NetworkError::Protocol(format!("Failed to parse identity: {}", e)))?;
+        self.context.set_identity(identity.clone()).await;
+        Ok(identity)
     }
 
     /// Unisonサーバーへの接続（Identity Handshake 含む）
