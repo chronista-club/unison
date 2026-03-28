@@ -7,7 +7,7 @@
 //! すべて `#[ignore = "Large: E2E test"]` 付き — `cargo test -- --ignored` で実行。
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::{Level, info};
@@ -32,7 +32,7 @@ async fn start_e2e_server() -> Result<(ServerHandle, String)> {
     // ping-pong チャネル: ping / echo / health メソッドを処理
     server
         .register_channel("ping-pong", move |_ctx, stream| async move {
-            let channel = UnisonChannel::new(stream);
+            let channel: UnisonChannel = UnisonChannel::new(stream);
             loop {
                 let msg = match channel.recv().await {
                     Ok(msg) => msg,
@@ -88,7 +88,7 @@ async fn start_e2e_server() -> Result<(ServerHandle, String)> {
                 };
 
                 if channel
-                    .send_response(request_id, &method, response)
+                    .send_response(request_id, &method, &response)
                     .await
                     .is_err()
                 {
@@ -141,7 +141,7 @@ async fn test_e2e_full_protocol_flow() -> Result<()> {
     let channel = client.open_channel("ping-pong").await?;
     let response = timeout(
         Duration::from_secs(5),
-        channel.request("ping", json!({"message": "E2E", "sequence": 1})),
+        channel.request::<_, Value>("ping", &json!({"message": "E2E", "sequence": 1})),
     )
     .await??;
     assert_eq!(
@@ -177,9 +177,9 @@ async fn test_e2e_echo_transformations() -> Result<()> {
     // Uppercase
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request(
+        channel.request::<_, Value>(
             "echo",
-            json!({"data": "hello world", "transform": "uppercase"}),
+            &json!({"data": "hello world", "transform": "uppercase"}),
         ),
     )
     .await??;
@@ -191,7 +191,7 @@ async fn test_e2e_echo_transformations() -> Result<()> {
     // Reverse
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request("echo", json!({"data": "abcd", "transform": "reverse"})),
+        channel.request::<_, Value>("echo", &json!({"data": "abcd", "transform": "reverse"})),
     )
     .await??;
     assert_eq!(
@@ -202,7 +202,7 @@ async fn test_e2e_echo_transformations() -> Result<()> {
     // No transform (identity)
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request("echo", json!({"data": "unchanged", "transform": ""})),
+        channel.request::<_, Value>("echo", &json!({"data": "unchanged", "transform": ""})),
     )
     .await??;
     assert_eq!(
@@ -233,7 +233,7 @@ async fn test_e2e_health_check() -> Result<()> {
     client.connect(&addr).await?;
     let channel = client.open_channel("ping-pong").await?;
 
-    let resp = timeout(Duration::from_secs(5), channel.request("health", json!({}))).await??;
+    let resp = timeout(Duration::from_secs(5), channel.request::<_, Value>("health", &json!({}))).await??;
     assert_eq!(resp.get("status").and_then(|v| v.as_str()), Some("ok"));
     assert!(
         resp.get("uptime_ms").and_then(|v| v.as_u64()).is_some(),
@@ -275,9 +275,9 @@ async fn test_e2e_complex_json_roundtrip() -> Result<()> {
 
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request(
+        channel.request::<_, Value>(
             "echo",
-            json!({"data": complex_data.clone(), "transform": ""}),
+            &json!({"data": complex_data.clone(), "transform": ""}),
         ),
     )
     .await??;
@@ -313,7 +313,7 @@ async fn test_e2e_sequential_throughput() -> Result<()> {
     for i in 0..count {
         let resp = timeout(
             Duration::from_secs(5),
-            channel.request("ping", json!({"message": "throughput", "sequence": i})),
+            channel.request::<_, Value>("ping", &json!({"message": "throughput", "sequence": i})),
         )
         .await??;
         assert_eq!(resp.get("sequence").and_then(|v| v.as_i64()), Some(i),);
@@ -351,7 +351,7 @@ async fn test_e2e_graceful_shutdown() -> Result<()> {
     let channel = client.open_channel("ping-pong").await?;
     let resp = timeout(
         Duration::from_secs(5),
-        channel.request("ping", json!({"message": "before shutdown", "sequence": 0})),
+        channel.request::<_, Value>("ping", &json!({"message": "before shutdown", "sequence": 0})),
     )
     .await??;
     assert_eq!(

@@ -20,7 +20,7 @@ async fn register_echo_channel(server: &ProtocolServer, counter: Arc<AtomicU64>)
         .register_channel("bench", move |_ctx, stream| {
             let counter = counter.clone();
             async move {
-                let channel = UnisonChannel::new(stream);
+                let channel: UnisonChannel = UnisonChannel::new(stream);
                 loop {
                     let msg = match channel.recv().await {
                         Ok(msg) => msg,
@@ -34,7 +34,7 @@ async fn register_echo_channel(server: &ProtocolServer, counter: Arc<AtomicU64>)
                             "id": payload.get("id").cloned().unwrap_or(json!(0))
                         });
                         if channel
-                            .send_response(msg.id, &msg.method, response)
+                            .send_response(msg.id, &msg.method, &response)
                             .await
                             .is_err()
                         {
@@ -83,10 +83,10 @@ fn bench_message_throughput(c: &mut Criterion) {
                     let payload_data = "x".repeat(payload_size);
 
                     for i in 0..batch_size {
-                        let _ = channel
+                        let _: Result<serde_json::Value, _> = channel
                             .request(
                                 "process",
-                                json!({
+                                &json!({
                                     "id": i,
                                     "data": payload_data.clone()
                                 }),
@@ -137,7 +137,7 @@ fn bench_streaming_throughput(c: &mut Criterion) {
 
                 while start.elapsed() < Duration::from_secs(1) {
                     if channel
-                        .request("stream", json!({"data": payload_data.clone()}))
+                        .request::<_, serde_json::Value>("stream", &json!({"data": payload_data.clone()}))
                         .await
                         .is_ok()
                     {
@@ -192,7 +192,7 @@ fn bench_parallel_throughput(c: &mut Criterion) {
                         let start = std::time::Instant::now();
 
                         while start.elapsed() < Duration::from_secs(1) {
-                            if channel.request("work", json!({})).await.is_ok() {
+                            if channel.request::<_, serde_json::Value>("work", &json!({})).await.is_ok() {
                                 local_count += 1;
                             }
                         }
@@ -245,10 +245,10 @@ fn bench_burst_throughput(c: &mut Criterion) {
                 let mut success_count = 0;
 
                 for i in 0..burst_size {
-                    let result = channel
+                    let result: Result<serde_json::Value, _> = channel
                         .request(
                             "burst",
-                            json!({
+                            &json!({
                                 "id": i,
                                 "timestamp": chrono::Utc::now().to_rfc3339()
                             }),

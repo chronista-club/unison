@@ -42,6 +42,7 @@
 //! `UnisonProtocol::generate_rust_code()` / `generate_typescript_code()` で
 //! KDLスキーマから型付きコードを生成できます。
 
+pub mod codec;
 pub mod codegen;
 pub mod network;
 pub mod parser;

@@ -54,7 +54,7 @@ fn test_integ_invalid_json_payload() {
         id: 1,
         method: "test".to_string(),
         msg_type: MessageType::Request,
-        payload: "this is not json {{{".to_string(),
+        payload: b"this is not json {{{".to_vec(),
     };
 
     let result = msg.payload_as_value();

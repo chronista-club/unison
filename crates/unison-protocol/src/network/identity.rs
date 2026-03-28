@@ -76,12 +76,12 @@ impl ServerIdentity {
             id: 0,
             method: "__identity".to_string(),
             msg_type: MessageType::Event,
-            payload: serde_json::to_string(self).unwrap(),
+            payload: serde_json::to_vec(self).unwrap(),
         }
     }
 
     /// ProtocolMessageから復元
     pub fn from_protocol_message(msg: &ProtocolMessage) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(&msg.payload)
+        serde_json::from_slice(&msg.payload)
     }
 }

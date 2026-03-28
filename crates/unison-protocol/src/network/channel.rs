@@ -3,15 +3,19 @@
 //! 各ChannelはQUICストリームにマッピングされ、
 //! 独立したHoL Blocking境界を形成する。
 //!
-//! `UnisonChannel` — 統合チャネル型（request/response + event push + raw bytes）
+//! `UnisonChannel<C: Codec>` — 統合チャネル型（request/response + event push + raw bytes）
+//!
+//! Codec 型パラメータにより、JSON / protobuf 等のフォーマットを差し替え可能。
 
-use serde_json::Value;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+use crate::codec::{Codec, Decodable, Encodable, JsonCodec};
 
 use super::quic::{TypedFrame, UnisonStream};
 use super::{MessageType, NetworkError, ProtocolMessage};
@@ -26,7 +30,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 ///   - `Response` → pending の oneshot に送る
 ///   - `Event` / その他 → event_rx に流す
 /// - Raw frame (0x01) → raw_rx に流す
-pub struct UnisonChannel {
+pub struct UnisonChannel<C: Codec = JsonCodec> {
     /// QUIC ストリームへの参照（送信用）
     stream: Arc<UnisonStream>,
     /// 応答待ちの Request を管理（message_id → oneshot::Sender）
@@ -41,9 +45,11 @@ pub struct UnisonChannel {
     recv_task: Mutex<Option<JoinHandle<()>>>,
     /// request() のタイムアウト
     request_timeout: Duration,
+    /// Codec 型マーカー
+    _codec: PhantomData<C>,
 }
 
-impl UnisonChannel {
+impl<C: Codec> UnisonChannel<C> {
     /// UnisonStream から UnisonChannel を構築し、recv ループを起動する
     pub fn new(stream: UnisonStream) -> Self {
         let stream = Arc::new(stream);
@@ -111,6 +117,7 @@ impl UnisonChannel {
             next_id: AtomicU64::new(1),
             recv_task: Mutex::new(Some(recv_task)),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            _codec: PhantomData,
         }
     }
 
@@ -120,11 +127,23 @@ impl UnisonChannel {
         self
     }
 
-    /// Request/Response パターン
+    /// 型付き Request/Response パターン
     ///
     /// メッセージ ID を自動生成し、pending マップに登録。
     /// Response が返るまで await する。
-    pub async fn request(&self, method: &str, payload: Value) -> Result<Value, NetworkError> {
+    ///
+    /// `Req` / `Resp` は Codec `C` に対して Encodable / Decodable であれば何でも使える:
+    /// - `UnisonChannel<JsonCodec>`: `serde::Serialize` / `DeserializeOwned` な型
+    /// - `UnisonChannel<ProtoCodec>`: `buffa::Message` な型
+    pub async fn request<Req, Resp>(
+        &self,
+        method: &str,
+        req: &Req,
+    ) -> Result<Resp, NetworkError>
+    where
+        Req: Encodable<C>,
+        Resp: Decodable<C>,
+    {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
@@ -134,9 +153,14 @@ impl UnisonChannel {
             map.insert(id, tx);
         }
 
-        // Request メッセージを直接フレームとして送信
-        let msg =
-            ProtocolMessage::new_with_json(id, method.to_string(), MessageType::Request, payload)?;
+        // Request メッセージを Codec でエンコードしてフレームとして送信
+        let payload = req.encode().map_err(NetworkError::Codec)?;
+        let msg = ProtocolMessage::new_encoded(
+            id,
+            method.to_string(),
+            MessageType::Request,
+            payload,
+        );
         self.stream.send_frame(&msg).await?;
 
         // Response を待つ（タイムアウト付き）
@@ -156,39 +180,50 @@ impl UnisonChannel {
 
         match response.msg_type {
             MessageType::Error => {
+                // エラーレスポンスは常に JSON (プロトコル内部)
                 let payload = response.payload_as_value()?;
                 Err(NetworkError::Protocol(format!(
                     "Request error: {}",
                     payload
                 )))
             }
-            _ => response.payload_as_value(),
+            _ => response.decode_payload::<Resp, C>(),
         }
     }
 
-    /// 一方向 Event 送信（応答不要）
-    pub async fn send_event(&self, method: &str, payload: Value) -> Result<(), NetworkError> {
-        let msg =
-            ProtocolMessage::new_with_json(0, method.to_string(), MessageType::Event, payload)?;
+    /// 型付き Event 送信（応答不要）
+    pub async fn send_event<T: Encodable<C>>(
+        &self,
+        method: &str,
+        payload: &T,
+    ) -> Result<(), NetworkError> {
+        let bytes = payload.encode().map_err(NetworkError::Codec)?;
+        let msg = ProtocolMessage::new_encoded(
+            0,
+            method.to_string(),
+            MessageType::Event,
+            bytes,
+        );
         self.stream.send_frame(&msg).await
     }
 
-    /// Request に対する Response 送信（サーバー側パターン）
+    /// 型付き Response 送信（サーバー側パターン）
     ///
     /// `recv()` で受け取った Request の `id` を指定して
     /// Response メッセージを返す。
-    pub async fn send_response(
+    pub async fn send_response<T: Encodable<C>>(
         &self,
         request_id: u64,
         method: &str,
-        payload: Value,
+        payload: &T,
     ) -> Result<(), NetworkError> {
-        let msg = ProtocolMessage::new_with_json(
+        let bytes = payload.encode().map_err(NetworkError::Codec)?;
+        let msg = ProtocolMessage::new_encoded(
             request_id,
             method.to_string(),
             MessageType::Response,
-            payload,
-        )?;
+            bytes,
+        );
         self.stream.send_frame(&msg).await
     }
 

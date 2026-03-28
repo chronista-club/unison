@@ -145,15 +145,15 @@ pub struct Channel {
     #[kdl(children, name = "event")]
     pub events: Vec<ChannelEvent>,
 
-    /// 送信メッセージ型（旧構文、後方互換）
+    /// 送信メッセージ型（旧 channel 構文）
     #[kdl(child)]
     pub send: Option<ChannelMessage>,
 
-    /// 受信メッセージ型（旧構文、後方互換）
+    /// 受信メッセージ型（旧 channel 構文）
     #[kdl(child)]
     pub recv: Option<ChannelMessage>,
 
-    /// エラー型（旧構文、後方互換）
+    /// エラー型（旧 channel 構文）
     #[kdl(child)]
     pub error: Option<ChannelMessage>,
 }

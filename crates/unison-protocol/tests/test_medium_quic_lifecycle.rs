@@ -26,7 +26,7 @@ fn init_tracing() {
 async fn register_echo_handler(server: &ProtocolServer) {
     server
         .register_channel("echo", |_ctx, stream| async move {
-            let channel = UnisonChannel::new(stream);
+            let channel: UnisonChannel = UnisonChannel::new(stream);
             loop {
                 let msg = match channel.recv().await {
                     Ok(msg) => msg,
@@ -37,7 +37,7 @@ async fn register_echo_handler(server: &ProtocolServer) {
                 }
                 let payload = msg.payload_as_value().unwrap_or_default();
                 if channel
-                    .send_response(msg.id, &msg.method, payload)
+                    .send_response(msg.id, &msg.method, &payload)
                     .await
                     .is_err()
                 {
@@ -188,7 +188,7 @@ async fn test_medium_quic_channel_request_response() -> Result<()> {
     let payload = serde_json::json!({"message": "hello", "number": 42});
     let response = timeout(
         Duration::from_secs(5),
-        channel.request("echo", payload.clone()),
+        channel.request::<_, serde_json::Value>("echo", &payload),
     )
     .await??;
 
@@ -230,7 +230,7 @@ async fn test_medium_quic_sequential_requests() -> Result<()> {
         let payload = serde_json::json!({"seq": i});
         let response = timeout(
             Duration::from_secs(5),
-            channel.request("echo", payload.clone()),
+            channel.request::<_, serde_json::Value>("echo", &payload),
         )
         .await??;
 

@@ -53,6 +53,9 @@ anyhow.workspace = true
 cgp.workspace = true
 cgp-component.workspace = true
 
+# Protocol Buffers
+buffa.workspace = true
+
 # Packet module dependencies
 bytes.workspace = true
 rkyv.workspace = true
@@ -72,6 +75,7 @@ kdl.workspace = true
 unison-kdl.workspace = true
 
 [build-dependencies]
+buffa-build.workspace = true
 kdl.workspace = true
 miette.workspace = true
 proc-macro2.workspace = true

@@ -209,7 +209,7 @@ impl UnisonTools {
             .map_err(|e| AgentError::Communication(format!("Failed to open channel: {}", e)))?;
 
         channel
-            .request(method, payload)
+            .request(method, &payload)
             .await
             .map_err(|e| AgentError::Communication(format!("Channel request failed: {}", e)))
     }

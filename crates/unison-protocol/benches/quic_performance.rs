@@ -27,7 +27,7 @@ async fn measure_latency(
         });
 
         let start = std::time::Instant::now();
-        let _ = channel.request("echo", message).await;
+        let _ = channel.request::<_, serde_json::Value>("echo", &message).await;
         histogram
             .record(start.elapsed().as_micros() as u64)
             .unwrap();
@@ -51,7 +51,7 @@ async fn measure_throughput(
             "sequence": count
         });
 
-        if channel.request("echo", message).await.is_ok() {
+        if channel.request::<_, serde_json::Value>("echo", &message).await.is_ok() {
             count += 1;
         }
     }
@@ -70,7 +70,7 @@ async fn setup_server() -> Arc<Barrier> {
         // Echo チャネルハンドラー
         server
             .register_channel("bench", |_ctx, stream| async move {
-                let channel = UnisonChannel::new(stream);
+                let channel: UnisonChannel = UnisonChannel::new(stream);
                 loop {
                     let msg = match channel.recv().await {
                         Ok(msg) => msg,
@@ -79,7 +79,7 @@ async fn setup_server() -> Arc<Barrier> {
                     if msg.msg_type == MessageType::Request {
                         let payload = msg.payload_as_value().unwrap_or_default();
                         if channel
-                            .send_response(msg.id, &msg.method, payload)
+                            .send_response(msg.id, &msg.method, &payload)
                             .await
                             .is_err()
                         {
@@ -214,10 +214,10 @@ fn bench_concurrent_connections(c: &mut Criterion) {
 
                             // 100回のリクエストを送信
                             for i in 0..100 {
-                                let _ = channel
+                                let _: Result<serde_json::Value, _> = channel
                                     .request(
                                         "echo",
-                                        json!({
+                                        &json!({
                                             "data": "test",
                                             "sequence": i
                                         }),

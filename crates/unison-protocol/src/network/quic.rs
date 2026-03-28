@@ -1026,7 +1026,7 @@ mod tests {
             id: 1,
             method: method.to_string(),
             msg_type: MessageType::Event,
-            payload: "{}".to_string(),
+            payload: b"{}".to_vec(),
         }
     }
 

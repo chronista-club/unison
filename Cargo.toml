@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 authors = ["Mako<mito@chronista.club>"]
 license = "MIT"
@@ -45,6 +45,10 @@ miette = { version = "7.2", features = ["fancy"] }
 # Context-Generic Programming
 cgp = "0.4.2"
 cgp-component = "0.4.2"
+
+# Protocol Buffers
+buffa = "0.2"
+buffa-build = "0.2"
 
 # Packet module dependencies
 bytes = "1.10"

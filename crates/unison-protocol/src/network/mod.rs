@@ -2,6 +2,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::codec::{CodecError, Decodable, Encodable, JsonCodec};
 use crate::packet::{RkyvPayload, SerializationError, UnisonPacket};
 
 pub mod channel;
@@ -32,6 +33,8 @@ pub enum NetworkError {
     Protocol(String),
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("Codec error: {0}")]
+    Codec(#[from] CodecError),
     #[error("Frame serialization error: {0}")]
     FrameSerialization(#[from] SerializationError),
     #[error("QUIC error: {0}")]
@@ -54,7 +57,7 @@ pub struct ProtocolMessage {
     pub method: String,
     #[serde(rename = "type")]
     pub msg_type: MessageType,
-    pub payload: String, // JSON文字列として保持してrkyv互換に
+    pub payload: Vec<u8>, // Codec がエンコードしたバイト列
 }
 
 /// フレームでラップされたプロトコルメッセージの型エイリアス
@@ -73,24 +76,46 @@ impl ProtocolMessage {
         Ok(payload.data.clone())
     }
 
-    /// JSON文字列からprotocolメッセージを作成
+    /// エンコード済みバイト列から ProtocolMessage を直接作成
+    pub fn new_encoded(
+        id: u64,
+        method: String,
+        msg_type: MessageType,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            id,
+            method,
+            msg_type,
+            payload,
+        }
+    }
+
+    /// JSON でエンコードして ProtocolMessage を作成
     pub fn new_with_json(
         id: u64,
         method: String,
         msg_type: MessageType,
         payload: serde_json::Value,
     ) -> Result<Self, NetworkError> {
-        Ok(Self {
-            id,
-            method,
-            msg_type,
-            payload: serde_json::to_string(&payload)?,
-        })
+        let bytes =
+            Encodable::<JsonCodec>::encode(&payload).map_err(NetworkError::Codec)?;
+        Ok(Self::new_encoded(id, method, msg_type, bytes))
     }
 
-    /// payloadをserde_json::Valueとして取得
+    /// JSON で payload をデコード
     pub fn payload_as_value(&self) -> Result<serde_json::Value, NetworkError> {
-        Ok(serde_json::from_str(&self.payload)?)
+        Ok(<serde_json::Value as Decodable<JsonCodec>>::decode(
+            &self.payload,
+        )?)
+    }
+
+    /// 任意の Codec + 型で payload をデコード
+    pub fn decode_payload<T, C: crate::codec::Codec>(&self) -> Result<T, NetworkError>
+    where
+        T: Decodable<C>,
+    {
+        Ok(T::decode(&self.payload)?)
     }
 }
 

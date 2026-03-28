@@ -15,6 +15,9 @@ pub use crate::parser::{
     ParsedSchema, SchemaParser,
 };
 
+// Codec 関連
+pub use crate::codec::{Codec, CodecError, Decodable, Encodable, JsonCodec, ProtoCodec};
+
 // コードジェネレータ関連
 pub use crate::codegen::{CodeGenerator, RustGenerator, TypeScriptGenerator};
 

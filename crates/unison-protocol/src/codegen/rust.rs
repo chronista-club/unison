@@ -272,7 +272,7 @@ impl RustGenerator {
                 #(#streams)*
             }
 
-            // クライアント実装（レガシー service 構文互換）
+            // クライアント実装（service 構文用）
             pub struct #client_name {
                 inner: ProtocolClient,
             }
@@ -331,7 +331,8 @@ impl RustGenerator {
 
         quote! {
             pub async fn #name(&self, channel: &crate::network::channel::UnisonChannel, request: #request_type) -> Result<#response_type> {
-                channel.request(#method_name, serde_json::to_value(request)?).await
+                // serde_json::Value を中継（インライン型生成の制約による）
+                channel.request::<serde_json::Value, #response_type>(#method_name, &serde_json::to_value(request)?).await
             }
         }
     }
@@ -399,7 +400,7 @@ impl RustGenerator {
             tokens.extend(self.generate_event_struct(evt, type_registry));
         }
 
-        // 旧構文: send/recv/error の各メッセージ型を生成（後方互換）
+        // send/recv/error の各メッセージ型を生成（旧 channel 構文）
         for msg in [&channel.send, &channel.recv, &channel.error]
             .iter()
             .filter_map(|m| m.as_ref())
