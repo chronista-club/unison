@@ -50,6 +50,8 @@ pub struct CallArgs {
     pub endpoint: String,
     /// 対象 channel 名
     pub channel_name: String,
+    /// 対象 method 名 (KDL schema の `request "Name"` の Name 部分)
+    pub method: String,
     /// 送信する JSON payload
     pub payload: serde_json::Value,
 }
@@ -71,7 +73,7 @@ impl UnisonProbe {
         &self,
         Parameters(args): Parameters<PingArgs>,
     ) -> Result<CallToolResult, McpError> {
-        use unison::network::ProtocolClient;
+        use unison::ProtocolClient;
 
         let client = ProtocolClient::new_default()
             .map_err(|e| McpError::internal_error(format!("client init failed: {e}"), None))?;
@@ -85,12 +87,12 @@ impl UnisonProbe {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "任意の Unison channel を open し、payload を送信して response を取得する")]
+    #[tool(description = "任意の Unison channel を open し、method に payload を request として送信して response を取得する")]
     async fn unison_call(
         &self,
         Parameters(args): Parameters<CallArgs>,
     ) -> Result<CallToolResult, McpError> {
-        use unison::network::ProtocolClient;
+        use unison::ProtocolClient;
 
         let client = ProtocolClient::new_default()
             .map_err(|e| McpError::internal_error(format!("client init failed: {e}"), None))?;
@@ -100,20 +102,23 @@ impl UnisonProbe {
             .await
             .map_err(|e| McpError::internal_error(format!("connect failed: {e}"), None))?;
 
-        let _channel = client
+        let channel = client
             .open_channel(&args.channel_name)
             .await
             .map_err(|e| McpError::internal_error(format!("open_channel failed: {e}"), None))?;
 
-        // TODO: channel に対して payload を送信し response を受け取る。
-        // UnisonChannel の request/response API に実装を合わせて差し込む。
-        let stub = serde_json::json!({
+        let response: serde_json::Value = channel
+            .request(&args.method, &args.payload)
+            .await
+            .map_err(|e| McpError::internal_error(format!("request failed: {e}"), None))?;
+
+        let result = serde_json::json!({
             "channel": args.channel_name,
-            "status": "opened",
-            "todo": "payload 送信と response 受信は未実装",
+            "method": args.method,
+            "response": response,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(stub.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
     #[tool(description = "サーバに登録されている channel 一覧を取得する (サーバ側 API 追加が前提)")]
