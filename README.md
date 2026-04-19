@@ -222,3 +222,8 @@ IPv6 専用設計。アドレスは `[::1]:port` を使う。
 ## ライセンス
 
 MIT License - [LICENSE](LICENSE)
+
+---
+
+> **Inspired by**: 宝鐘マリン船長の [Unison](https://www.youtube.com/watch?v=_VIeV_LZXHM) ⚓
+> 「同じ調べに乗る」という意味も、このフレームワークの名に込めています。
