@@ -32,6 +32,47 @@ fn test_integ_ping_pong_full_pipeline() {
     );
 }
 
+/// schemas/hierophant.kdl を読み込み → parse → generate → pub/sub + P2P 検証
+/// Refs: USN-3 (Hierophant Green 💚)
+#[test]
+fn test_integ_hierophant_full_pipeline() {
+    let schema = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/hierophant.kdl"
+    ))
+    .unwrap();
+
+    let parser = SchemaParser::new();
+    let parsed = parser.parse(&schema).unwrap();
+
+    // プロトコル基本情報
+    let protocol = parsed.protocol.as_ref().expect("protocol should exist");
+    assert_eq!(protocol.name, "hierophant");
+    assert_eq!(protocol.channels.len(), 2); // identity, pubsub
+
+    let channel_names: Vec<&str> = protocol.channels.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(channel_names, vec!["identity", "pubsub"]);
+
+    // codegen が通ること
+    let type_registry = TypeRegistry::new();
+    let generator = RustGenerator::new();
+    let code = generator.generate(&parsed, &type_registry).unwrap();
+
+    // Identity plane (point-to-point)
+    assert!(code.contains("Register"), "Expected Register request");
+    assert!(code.contains("Send"), "Expected Send request");
+    assert!(code.contains("Received"), "Expected Received event");
+
+    // Pub/Sub plane
+    assert!(code.contains("Publish"), "Expected Publish request");
+    assert!(
+        code.contains("Subscribe"),
+        "Expected Subscribe request (pubsub plane)"
+    );
+    assert!(code.contains("Unsubscribe"), "Expected Unsubscribe request");
+    assert!(code.contains("TopicEvent"), "Expected TopicEvent event");
+}
+
 /// schemas/creo_sync.kdl → parse → generate → 5チャネル検証
 #[test]
 fn test_integ_creo_sync_full_pipeline() {
