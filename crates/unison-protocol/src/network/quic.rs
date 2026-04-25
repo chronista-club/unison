@@ -26,73 +26,100 @@ const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
 /// Default port for QUIC connections
 const DEFAULT_PORT: u16 = 8080;
 
-/// IPv6アドレス文字列をSocketAddrに変換する共通関数
+/// アドレス文字列を SocketAddr に解決する共通関数。
+///
+/// IPv6 / IPv4 リテラル + DNS hostname を受け付け、必要に応じて DNS 解決する。
 ///
 /// 対応形式:
-/// - `[::1]:8080` — 標準 IPv6+port
-/// - `::1` — IPv6 のみ（デフォルトポート付与）
-/// - `8080` — ポートのみ（IPv6 ループバック）
-/// - `localhost:8080` — ループバック
-fn parse_ipv6_address(addr: &str) -> Result<SocketAddr> {
-    // まず直接パースを試みる（IPv6のみ受け入れる）
+/// - `[::1]:8080` — IPv6 リテラル + port
+/// - `::1` — IPv6 のみ (DEFAULT_PORT 付与)
+/// - `1.2.3.4:8080` — IPv4 リテラル + port
+/// - `8080` — port のみ (IPv6 ループバック fallback)
+/// - `localhost:8080` / `localhost` — DNS 解決
+/// - `host.example.com:8080` / `host.example.com` — DNS 解決
+/// - `https://host:port` / `http://host:port` / `quic://host:port` — scheme prefix を strip
+///
+/// DNS 解決時は最初の resolved address を返す (IPv4/IPv6 どちらでも、リゾルバの順)。
+async fn resolve_socket_addr(addr: &str) -> Result<SocketAddr> {
+    // URL scheme 剥がし
+    let addr = strip_scheme(addr);
+
+    // 1. IPv4/IPv6 リテラル + port を直接 parse
     if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
-        match socket_addr {
-            SocketAddr::V6(_) => return Ok(socket_addr),
-            SocketAddr::V4(_) => {
-                return Err(anyhow::anyhow!(
-                    "IPv4アドレスはサポートされていません: {}",
-                    addr
-                ));
-            }
-        }
+        return Ok(socket_addr);
     }
 
-    // IPv6アドレスとして解析を試みる（ポートなし）
-    if addr.contains(':') && !addr.contains('[') && !addr.contains('.') {
-        let addr_with_brackets = format!("[{}]:{}", addr, DEFAULT_PORT);
-        if let Ok(socket_addr @ SocketAddr::V6(_)) = addr_with_brackets.parse::<SocketAddr>() {
-            return Ok(socket_addr);
-        }
-    }
-
-    // ポート番号のみの場合はIPv6ループバックを使用
+    // 2. port のみ ("8080") → IPv6 ループバック (後方互換)
     if let Ok(port) = addr.parse::<u16>() {
         return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
     }
 
-    // "localhost:port"形式の場合はIPv6ループバックを使用
-    if let Some(stripped) = addr.strip_prefix("localhost:")
-        && let Ok(port) = stripped.parse::<u16>()
-    {
-        return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
+    // 3. IPv6 リテラル、port なし ("::1")
+    if addr.contains(':') && !addr.contains('[') && !addr.contains('.') {
+        let with_port = format!("[{}]:{}", addr, DEFAULT_PORT);
+        if let Ok(sa) = with_port.parse::<SocketAddr>() {
+            return Ok(sa);
+        }
     }
 
-    // [IPv6]:port 形式を解析
+    // 4. [IPv6]:port (bracket notation で port パース失敗ケース対応)
     if addr.starts_with('[')
         && let Some(end) = addr.find(']')
     {
         let ipv6_str = &addr[1..end];
-        let port_str = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
-            &addr[end + 2..]
-        } else {
-            return Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr));
-        };
-
         let ipv6 = ipv6_str
             .parse::<std::net::Ipv6Addr>()
             .map_err(|_| anyhow::anyhow!("無効なIPv6アドレス: {}", ipv6_str))?;
-        let port = if port_str.is_empty() {
-            DEFAULT_PORT
+        let port = if addr.len() > end + 1 && &addr[end + 1..end + 2] == ":" {
+            let port_str = &addr[end + 2..];
+            if port_str.is_empty() {
+                DEFAULT_PORT
+            } else {
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
+            }
         } else {
-            port_str
-                .parse::<u16>()
-                .map_err(|_| anyhow::anyhow!("無効なポート番号: {}", port_str))?
+            DEFAULT_PORT
         };
-
         return Ok(SocketAddr::from((ipv6, port)));
     }
 
-    Err(anyhow::anyhow!("無効なIPv6アドレス形式: {}", addr))
+    // 5. DNS hostname (host or host:port)
+    let lookup_target = if has_port(addr) {
+        addr.to_string()
+    } else {
+        format!("{}:{}", addr, DEFAULT_PORT)
+    };
+    let mut iter = tokio::net::lookup_host(&lookup_target)
+        .await
+        .with_context(|| format!("DNS lookup 失敗: {}", lookup_target))?;
+    iter.next()
+        .with_context(|| format!("アドレスを解決できませんでした: {}", lookup_target))
+}
+
+/// `https://` / `http://` / `quic://` 前置詞を取り除く
+fn strip_scheme(addr: &str) -> &str {
+    addr.strip_prefix("https://")
+        .or_else(|| addr.strip_prefix("http://"))
+        .or_else(|| addr.strip_prefix("quic://"))
+        .unwrap_or(addr)
+}
+
+/// アドレスが `host:port` 形式 (末尾に port が付いている) か判定。
+/// IPv6 リテラルは bracket notation 限定で判定する (生 `::1` は port 無し扱い)。
+fn has_port(addr: &str) -> bool {
+    if addr.starts_with('[') {
+        return addr.contains("]:");
+    }
+    // 単純な hostname or IPv4 — 末尾の `:NNN` を port として認識
+    if let Some(colon) = addr.rfind(':') {
+        // host:port の host 側に ':' が無い (= IPv6 ではない) ことを担保
+        if !addr[..colon].contains(':') {
+            return addr[colon + 1..].parse::<u16>().is_ok();
+        }
+    }
+    false
 }
 
 /// Length-prefixed フレームの読み取り（4バイトBE長 + データ）
@@ -252,9 +279,9 @@ impl QuicClient {
 }
 
 impl QuicClient {
-    /// IPv6専用でサーバーアドレスを解析
-    fn parse_server_address(addr: &str) -> Result<SocketAddr> {
-        parse_ipv6_address(addr)
+    /// サーバーアドレスを解析 (IPv4 / IPv6 / DNS hostname 対応)
+    async fn parse_server_address(addr: &str) -> Result<SocketAddr> {
+        resolve_socket_addr(addr).await
     }
 
     pub async fn receive(&self) -> Result<ProtocolMessage> {
@@ -287,13 +314,16 @@ impl QuicClient {
     }
 
     pub async fn connect(&self, url: &str) -> Result<()> {
-        // Parse URL (IPv6 only)
-        let addr = Self::parse_server_address(url)?;
+        // URL を解決 (IPv4 / IPv6 / DNS hostname)
+        let addr = Self::parse_server_address(url).await?;
 
         let client_config = Self::configure_client().await?;
 
-        // IPv6専用でバインド
-        let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+        // bind addr は target family に揃える (IPv4 target には 0.0.0.0、IPv6 target には [::])
+        let bind_addr: SocketAddr = match addr {
+            SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+            SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+        };
 
         let mut endpoint = Endpoint::client(bind_addr)?;
         endpoint.set_default_client_config(client_config);
@@ -303,7 +333,7 @@ impl QuicClient {
             .await
             .context("Failed to establish QUIC connection")?;
 
-        info!("Connected to QUIC server at {} (IPv6)", addr);
+        info!("Connected to QUIC server at {}", addr);
 
         // Endpoint を保存（drop されると UDP ソケットが閉じて接続が切れる）
         *self.endpoint.lock().await = Some(endpoint);
@@ -492,20 +522,20 @@ impl QuicServer {
     }
 
     pub async fn bind(&mut self, addr: &str) -> Result<()> {
-        // IPv6を優先的に使用し、IPv4もサポート
-        let socket_addr = Self::parse_socket_addr(addr)?;
+        // IPv4 / IPv6 / DNS hostname のいずれにも対応
+        let socket_addr = Self::parse_socket_addr(addr).await?;
 
         let server_config = Self::configure_server().await?;
         let endpoint = Endpoint::server(server_config, socket_addr)?;
 
-        info!("QUIC server bound to {} (IPv6)", socket_addr);
+        info!("QUIC server bound to {}", socket_addr);
         self.endpoint = Some(endpoint);
         Ok(())
     }
 
-    /// IPv6専用でソケットアドレスを解析
-    fn parse_socket_addr(addr: &str) -> Result<SocketAddr> {
-        parse_ipv6_address(addr)
+    /// ソケットアドレスを解析 (IPv4 / IPv6 / DNS hostname 対応)
+    async fn parse_socket_addr(addr: &str) -> Result<SocketAddr> {
+        resolve_socket_addr(addr).await
     }
 
     /// バインド済みのローカルアドレスを取得
@@ -1141,5 +1171,108 @@ mod tests {
             "already consumed エラーメッセージを含むべき: {}",
             err_msg
         );
+    }
+
+    // ─────────────────────────────────────────
+    // resolve_socket_addr — IPv4 / IPv6 / DNS hostname tests
+    // ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_ipv6_literal_with_port() {
+        let sa = resolve_socket_addr("[::1]:8080").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V6(_)));
+        assert_eq!(sa.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv6_literal_without_port_uses_default() {
+        let sa = resolve_socket_addr("::1").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V6(_)));
+        assert_eq!(sa.port(), DEFAULT_PORT);
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv4_literal_with_port_is_now_supported() {
+        let sa = resolve_socket_addr("127.0.0.1:8080").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V4(_)));
+        assert_eq!(sa.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn resolve_port_only_falls_back_to_ipv6_loopback() {
+        let sa = resolve_socket_addr("8080").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V6(_)));
+        assert_eq!(sa.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn resolve_localhost_with_port_via_dns() {
+        let sa = resolve_socket_addr("localhost:8080").await.unwrap();
+        // tokio::net::lookup_host が IPv4 / IPv6 のどちらを返すかは環境依存だが
+        // port は確実に 8080
+        assert_eq!(sa.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn resolve_strips_https_scheme() {
+        let sa = resolve_socket_addr("https://[::1]:4510").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V6(_)));
+        assert_eq!(sa.port(), 4510);
+    }
+
+    #[tokio::test]
+    async fn resolve_strips_http_scheme() {
+        let sa = resolve_socket_addr("http://127.0.0.1:8080").await.unwrap();
+        assert!(matches!(sa, SocketAddr::V4(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_strips_quic_scheme() {
+        let sa = resolve_socket_addr("quic://[::1]:9999").await.unwrap();
+        assert_eq!(sa.port(), 9999);
+    }
+
+    #[tokio::test]
+    async fn resolve_unresolvable_hostname_errors() {
+        let res = resolve_socket_addr("definitely-not-a-real-host-12345.invalid:8080").await;
+        assert!(res.is_err(), "unresolvable hostname should error");
+    }
+
+    #[test]
+    fn has_port_recognizes_ipv4_with_port() {
+        assert!(has_port("127.0.0.1:8080"));
+        assert!(has_port("example.com:443"));
+    }
+
+    #[test]
+    fn has_port_recognizes_ipv6_bracket_with_port() {
+        assert!(has_port("[::1]:8080"));
+        assert!(has_port("[fd7a:115c:a1e0::f936:d97b]:4510"));
+    }
+
+    #[test]
+    fn has_port_rejects_bare_ipv6_without_brackets() {
+        // "::1" は port 無しと扱う (IPv6 リテラルは bracket 必須)
+        assert!(!has_port("::1"));
+        assert!(!has_port("fd7a:115c:a1e0::f936:d97b"));
+    }
+
+    #[test]
+    fn has_port_rejects_hostname_without_port() {
+        assert!(!has_port("example.com"));
+        assert!(!has_port("localhost"));
+    }
+
+    #[test]
+    fn strip_scheme_removes_known_prefixes() {
+        assert_eq!(strip_scheme("https://example.com:443"), "example.com:443");
+        assert_eq!(strip_scheme("http://example.com:80"), "example.com:80");
+        assert_eq!(strip_scheme("quic://example.com:4510"), "example.com:4510");
+    }
+
+    #[test]
+    fn strip_scheme_keeps_address_when_no_prefix() {
+        assert_eq!(strip_scheme("example.com:443"), "example.com:443");
+        assert_eq!(strip_scheme("[::1]:8080"), "[::1]:8080");
     }
 }
