@@ -5,6 +5,25 @@
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に基づいており、
 このプロジェクトは [セマンティックバージョニング](https://semver.org/lang/ja/) に準拠しています。
 
+## [0.8.0] - 2026-05-15
+
+### 追加
+- **`QuicServer::builder(server)`** / **`QuicClient::builder()`** — v0.8.0+ の推奨構築 API
+  - `QuicServerBuilder::cert_source(CertSource)` — server 側 cert を明示
+  - `QuicClientBuilder::trust_anchors(TrustAnchors)` — client 側 trust を明示
+  - 旧 `QuicServer::new()` / `QuicClient::new()` は backward compat 用に維持 (default = `dev_localhost` / `SkipVerification`)
+- **`examples/builder_api.rs`** — 4 ユースケース (dev quickstart / internal mesh / from file / public CA) の使用例
+
+### 変更
+- `QuicClient` 内部に `trust_anchors: TrustAnchors` フィールド追加、`connect` が builder で設定された値を使用
+- `QuicServer` 内部に `cert_source: CertSource` フィールド追加、`bind` が builder で設定された値を使用
+- `unison-mcp-probe`: `unison_ping` / `unison_call` tool に `trust` 引数追加 (`"skip"` (default) | `"system"`)
+  - builder API のリファレンス実装として機能
+
+### 内部
+- 既存 `connect()` / `bind()` は instance の `trust_anchors` / `cert_source` を読むので、builder 経由なら明示的、`new()` 経由なら従来 default で互換性維持
+- これにより `ProtocolClient::new_default()` / `QuicClient::new()` 利用者は無変更で v0.8.0 に上がれる
+
 ## [0.7.0] - 2026-05-15
 
 ### 追加 (新 TLS API)
