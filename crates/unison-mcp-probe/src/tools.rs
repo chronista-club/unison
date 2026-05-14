@@ -38,10 +38,39 @@ impl Default for UnisonProbe {
 // Tool input schemas
 // ---------------------------------------------------------------------------
 
+/// Trust mode selector for the probe (matches `club_unison::TrustAnchors`).
+///
+/// - `"skip"`: skip cert verification (dev only, against self-signed servers)
+/// - `"system"`: use OS/webpki-roots trust store (for public servers)
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustMode {
+    Skip,
+    System,
+}
+
+impl Default for TrustMode {
+    fn default() -> Self {
+        Self::Skip
+    }
+}
+
+impl TrustMode {
+    fn to_anchors(&self) -> club_unison::network::TrustAnchors {
+        match self {
+            Self::Skip => club_unison::network::TrustAnchors::SkipVerification,
+            Self::System => club_unison::network::TrustAnchors::System,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PingArgs {
     /// Unison サーバの URL (例: `quic://[::1]:7878`)
     pub endpoint: String,
+    /// Trust anchor mode (default: `skip` — dev self-signed 用)
+    #[serde(default)]
+    pub trust: TrustMode,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -54,6 +83,9 @@ pub struct CallArgs {
     pub method: String,
     /// 送信する JSON payload
     pub payload: serde_json::Value,
+    /// Trust anchor mode (default: `skip`)
+    #[serde(default)]
+    pub trust: TrustMode,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -74,16 +106,21 @@ impl UnisonProbe {
         Parameters(args): Parameters<PingArgs>,
     ) -> Result<CallToolResult, McpError> {
         use club_unison::ProtocolClient;
+        use club_unison::network::quic::QuicClient;
 
-        let client = ProtocolClient::new_default()
+        // v0.8.0 builder で trust anchor を明示
+        let quic = QuicClient::builder()
+            .trust_anchors(args.trust.to_anchors())
+            .build()
             .map_err(|e| McpError::internal_error(format!("client init failed: {e}"), None))?;
+        let client = ProtocolClient::new(quic);
 
         client
             .connect(&args.endpoint)
             .await
             .map_err(|e| McpError::internal_error(format!("connect failed: {e}"), None))?;
 
-        let msg = format!("✅ connected to {}", args.endpoint);
+        let msg = format!("✅ connected to {} (trust={:?})", args.endpoint, args.trust);
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
@@ -93,9 +130,14 @@ impl UnisonProbe {
         Parameters(args): Parameters<CallArgs>,
     ) -> Result<CallToolResult, McpError> {
         use club_unison::ProtocolClient;
+        use club_unison::network::quic::QuicClient;
 
-        let client = ProtocolClient::new_default()
+        // v0.8.0 builder で trust anchor を明示
+        let quic = QuicClient::builder()
+            .trust_anchors(args.trust.to_anchors())
+            .build()
             .map_err(|e| McpError::internal_error(format!("client init failed: {e}"), None))?;
+        let client = ProtocolClient::new(quic);
 
         client
             .connect(&args.endpoint)

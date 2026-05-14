@@ -216,9 +216,57 @@ pub struct QuicClient {
     identity_tx: Arc<Mutex<Option<oneshot::Sender<ProtocolMessage>>>>,
     /// レスポンス受信タスクのハンドルを管理
     response_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Trust anchors used when verifying the server's certificate during connect.
+    ///
+    /// v0.8.0: explicit per-instance trust selection. Defaults to
+    /// `TrustAnchors::SkipVerification` for backward compatibility with
+    /// `QuicClient::new()` callers (will be tightened in v0.9.0).
+    trust_anchors: super::trust::TrustAnchors,
+}
+
+/// Builder for [`QuicClient`] (v0.8.0+).
+///
+/// Use [`QuicClient::builder`] to construct.
+pub struct QuicClientBuilder {
+    trust_anchors: Option<super::trust::TrustAnchors>,
+}
+
+impl QuicClientBuilder {
+    /// Set the trust anchor source used to verify server certs on `connect`.
+    pub fn trust_anchors(mut self, trust: super::trust::TrustAnchors) -> Self {
+        self.trust_anchors = Some(trust);
+        self
+    }
+
+    /// Build the [`QuicClient`]. If `trust_anchors` is not set, defaults to
+    /// [`super::trust::TrustAnchors::SkipVerification`] for backward
+    /// compatibility — a `tracing::warn!` is emitted at connect time.
+    pub fn build(self) -> Result<QuicClient> {
+        let trust_anchors = self
+            .trust_anchors
+            .unwrap_or(super::trust::TrustAnchors::SkipVerification);
+        let (tx, rx) = mpsc::unbounded_channel();
+        Ok(QuicClient {
+            endpoint: Mutex::new(None),
+            connection: Arc::new(RwLock::new(None)),
+            rx: Arc::new(RwLock::new(Some(rx))),
+            tx,
+            identity_rx: Arc::new(Mutex::new(None)),
+            identity_tx: Arc::new(Mutex::new(None)),
+            response_tasks: Arc::new(Mutex::new(Vec::new())),
+            trust_anchors,
+        })
+    }
 }
 
 impl QuicClient {
+    /// Builder entry point (v0.8.0+) — preferred over [`Self::new`].
+    pub fn builder() -> QuicClientBuilder {
+        QuicClientBuilder {
+            trust_anchors: None,
+        }
+    }
+
     pub fn new() -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         Ok(Self {
@@ -229,6 +277,7 @@ impl QuicClient {
             identity_rx: Arc::new(Mutex::new(None)),
             identity_tx: Arc::new(Mutex::new(None)),
             response_tasks: Arc::new(Mutex::new(Vec::new())),
+            trust_anchors: super::trust::TrustAnchors::SkipVerification,
         })
     }
 
@@ -320,10 +369,9 @@ impl QuicClient {
         // URL を解決 (IPv4 / IPv6 / DNS hostname)
         let addr = Self::parse_server_address(url).await?;
 
-        // 内部既定は SkipVerification (= 旧 configure_client() の挙動を維持)。
-        // 明示的な trust 選択は今後 ProtocolClient::builder() で行う。
-        let client_config =
-            Self::configure_client_with(super::trust::TrustAnchors::SkipVerification).await?;
+        // v0.8.0+: builder で設定された trust_anchors を使う (default = SkipVerification、
+        // builder 経由で TrustAnchors::System 等に明示変更可能)
+        let client_config = Self::configure_client_with(self.trust_anchors.clone()).await?;
 
         // bind addr は target family に揃える (IPv4 target には 0.0.0.0、IPv6 target には [::])
         let bind_addr: SocketAddr = match addr {
@@ -397,13 +445,56 @@ impl QuicClient {
 pub struct QuicServer {
     server: Arc<ProtocolServer>,
     endpoint: Option<Endpoint>,
+    /// Cert source used by `bind` to configure the TLS server.
+    ///
+    /// v0.8.0+: explicit per-instance cert selection via [`QuicServer::builder`].
+    /// Defaults to [`super::cert::CertSource::dev_localhost`] for backward
+    /// compatibility with `QuicServer::new()`.
+    cert_source: super::cert::CertSource,
+}
+
+/// Builder for [`QuicServer`] (v0.8.0+).
+///
+/// Use [`QuicServer::builder`] to construct.
+pub struct QuicServerBuilder {
+    server: Arc<ProtocolServer>,
+    cert_source: Option<super::cert::CertSource>,
+}
+
+impl QuicServerBuilder {
+    /// Set the cert source used to configure the TLS server at bind time.
+    pub fn cert_source(mut self, cert: super::cert::CertSource) -> Self {
+        self.cert_source = Some(cert);
+        self
+    }
+
+    /// Build the [`QuicServer`]. If `cert_source` is not set, defaults to
+    /// [`super::cert::CertSource::dev_localhost`] (DEV ONLY).
+    pub fn build(self) -> QuicServer {
+        QuicServer {
+            server: self.server,
+            endpoint: None,
+            cert_source: self
+                .cert_source
+                .unwrap_or_else(super::cert::CertSource::dev_localhost),
+        }
+    }
 }
 
 impl QuicServer {
+    /// Builder entry point (v0.8.0+) — preferred over [`Self::new`].
+    pub fn builder(server: Arc<ProtocolServer>) -> QuicServerBuilder {
+        QuicServerBuilder {
+            server,
+            cert_source: None,
+        }
+    }
+
     pub fn new(server: Arc<ProtocolServer>) -> Self {
         Self {
             server,
             endpoint: None,
+            cert_source: super::cert::CertSource::dev_localhost(),
         }
     }
 
@@ -496,11 +587,9 @@ impl QuicServer {
         // IPv4 / IPv6 / DNS hostname のいずれにも対応
         let socket_addr = Self::parse_socket_addr(addr).await?;
 
-        // 内部既定は dev_localhost (= 旧 configure_server() の挙動を維持、ただし
-        // assets/certs/ や rust-embed への fallback は廃止)。
-        // 明示的な cert 指定は今後 ProtocolServer::builder() で行う。
-        let server_config =
-            Self::configure_server_with(super::cert::CertSource::dev_localhost()).await?;
+        // v0.8.0+: builder で設定された cert_source を使う (default = dev_localhost、
+        // builder 経由で Provided / FromFile / internal_mesh に明示変更可能)
+        let server_config = Self::configure_server_with(self.cert_source.clone()).await?;
         let endpoint = Endpoint::server(server_config, socket_addr)?;
 
         info!("QUIC server bound to {}", socket_addr);
