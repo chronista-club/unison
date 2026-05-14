@@ -52,15 +52,26 @@ pub enum NetworkError {
 impl NetworkError {
     /// この error が **正常な channel 終端** (= sender side 完了で drop) を表すか判定する。
     ///
-    /// `UnisonChannel::recv()` / `recv_raw()` は tokio mpsc receiver が None を返した時
-    /// `Protocol("Channel closed" | "Raw channel closed")` を生成する。 これは sender 側が
-    /// request/response 完了後に正常 close した end-of-stream であり、 真の error ではない。
-    /// caller (= e.g. QUIC server の channel handler dispatcher) は log level を ERROR ではなく
-    /// debug / info に degrade することで noise を抑えられる。
+    /// `UnisonChannel::recv()` / `recv_raw()` / `request()` は内部の sender / oneshot が
+    /// drop された時に 3 種類の Protocol error を生成する:
+    ///
+    /// - `"Channel closed"` — `recv()` で mpsc receiver が None を返した
+    /// - `"Raw channel closed"` — `recv_raw()` で raw mpsc receiver が None を返した
+    /// - `"Request cancelled: channel closed"` — `request()` 中に oneshot sender が drop した
+    ///
+    /// これらは sender 側が request/response 完了後に正常 close した end-of-stream であり、
+    /// 真の error ではない。 caller (= e.g. QUIC server の channel handler dispatcher) は
+    /// log level を ERROR ではなく debug / info に degrade することで noise を抑えられる。
+    ///
+    /// 文字列マッチで判定しているため、将来追加されるパターンも忘れずにここを更新すること。
+    /// (長期的には `NetworkError::ChannelEof` のような enum variant 化で型安全にすべき)
     pub fn is_normal_close(&self) -> bool {
         matches!(
             self,
-            NetworkError::Protocol(msg) if msg == "Channel closed" || msg == "Raw channel closed"
+            NetworkError::Protocol(msg)
+                if msg == "Channel closed"
+                || msg == "Raw channel closed"
+                || msg == "Request cancelled: channel closed"
         )
     }
 }
@@ -171,7 +182,7 @@ mod tests {
     use super::*;
 
     /// `NetworkError::is_normal_close()` が `UnisonChannel::recv()` /
-    /// `recv_raw()` で生成される 2 種類の "Channel closed" を正常終端と判定し、
+    /// `recv_raw()` / `request()` で生成される 3 種類の正常終端を判定し、
     /// それ以外の Protocol error / 他 variant は real error 扱いするか確認。
     #[test]
     fn is_normal_close_recognizes_channel_eof() {
@@ -179,6 +190,11 @@ mod tests {
         assert!(NetworkError::Protocol("Channel closed".to_string()).is_normal_close());
         // recv_raw() の end-of-stream
         assert!(NetworkError::Protocol("Raw channel closed".to_string()).is_normal_close());
+        // request() 中の oneshot sender drop
+        assert!(
+            NetworkError::Protocol("Request cancelled: channel closed".to_string())
+                .is_normal_close()
+        );
     }
 
     #[test]

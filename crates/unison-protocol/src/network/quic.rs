@@ -750,6 +750,14 @@ async fn handle_connection(
                                 if let Some(handler) =
                                     server.get_channel_handler(&channel_name).await
                                 {
+                                    // channel lifecycle の "open" 側ログ。
+                                    // close 側 (= 下記の debug!) と対になり、 1 接続中の
+                                    // channel 開閉 trace が debug level で揃う。
+                                    // info level にしない理由: 1 接続で channel が頻繁に
+                                    // open/close される設計 (= 1 request/response = 1 channel)
+                                    // なので info noise になりがち。
+                                    debug!("Channel '{}' opened", channel_name);
+
                                     // チャネル用のUnisonStreamを作成（ストリームは生きたまま）
                                     let stream = UnisonStream::from_streams(
                                         request.id,
