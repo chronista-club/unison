@@ -11,8 +11,8 @@
 
 // パーサー関連
 pub use crate::parser::{
-    Channel, ChannelEvent, ChannelFrom, ChannelLifetime, ChannelMessage, ChannelRequest,
-    ParsedSchema, SchemaParser,
+    Channel, ChannelBackend, ChannelEvent, ChannelFrom, ChannelLifetime, ChannelMessage,
+    ChannelRequest, ParsedSchema, SchemaParser,
 };
 
 // Codec 関連

@@ -79,6 +79,24 @@ pub enum ChannelLifetime {
     Persistent,
 }
 
+/// Channel の wire backend (v0.10.0 で追加)
+///
+/// `Stream` は QUIC bidi stream に対応 (= ordered + reliable)、 `Datagram` は QUIC
+/// datagram に対応 (= unordered + unreliable + ≤MTU)。 `Datagram` の場合は
+/// [`Channel::channel_id`] が必須 (= varint prefix で demux)。 default は `Stream`。
+///
+/// 詳細は `design/datagram-channel.md` および `spec/02-unified-channel/SPEC.md` §8.5 参照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, KdlDeserialize)]
+pub enum ChannelBackend {
+    /// QUIC bidi stream (= ordered + reliable、 v0.9.0 までの唯一の backend)
+    #[default]
+    #[kdl(rename = "stream")]
+    Stream,
+    /// QUIC datagram (= unordered + unreliable、 ≤MTU、 v0.10.0 で追加)
+    #[kdl(rename = "datagram")]
+    Datagram,
+}
+
 /// Channel内のメッセージ定義（名前付き）
 #[derive(Debug, Clone, KdlDeserialize)]
 pub struct ChannelMessage {
@@ -137,6 +155,22 @@ pub struct Channel {
     #[kdl(property)]
     pub lifetime: ChannelLifetime,
 
+    /// Wire backend (= `"stream"` (default) / `"datagram"`、 v0.10.0 で追加)
+    ///
+    /// 省略時は [`ChannelBackend::Stream`] (= v0.9.0 schema 互換動作)。
+    /// [`ChannelBackend::Datagram`] の場合は [`Self::channel_id`] が必須。
+    /// 取得は [`Self::backend`] で実行 (= Option を unwrap)。
+    #[kdl(property)]
+    pub backend: Option<ChannelBackend>,
+
+    /// Datagram channel の demux 識別子 (v0.10.0 で追加)
+    ///
+    /// `backend="datagram"` のとき必須、 1.. の正整数。 wire 上は varint encoded
+    /// prefix として datagram payload 先頭に乗る。 author 明示割り当て (= proto3
+    /// field number 哲学)、 schema reorder で値を変えると wire format breaking。
+    #[kdl(property)]
+    pub channel_id: Option<u64>,
+
     /// Request/Response 定義（新構文）
     #[kdl(children, name = "request")]
     pub requests: Vec<ChannelRequest>,
@@ -156,6 +190,50 @@ pub struct Channel {
     /// エラー型（旧 channel 構文）
     #[kdl(child)]
     pub error: Option<ChannelMessage>,
+}
+
+impl Channel {
+    /// この channel の backend を取得 (= default は [`ChannelBackend::Stream`])
+    pub fn backend(&self) -> ChannelBackend {
+        self.backend.unwrap_or_default()
+    }
+
+    /// Channel の semantic validation を行う。
+    ///
+    /// 検証項目:
+    /// - `backend="datagram"` の場合は `channel_id` が必須、 0 は予約 (= sentinel)
+    /// - `backend="stream"` (= default) の場合は `channel_id` を指定しても無視 (= warning は出さない)
+    /// - `backend="datagram"` の channel は `request` ブロックを持てない (= datagram は応答不可)
+    pub fn validate(&self) -> Result<(), String> {
+        match self.backend() {
+            ChannelBackend::Datagram => {
+                let id = self
+                    .channel_id
+                    .ok_or_else(|| {
+                        format!(
+                            "channel \"{}\" has backend=\"datagram\" but no channel_id; \
+                             explicit channel_id=N (1..) is required",
+                            self.name
+                        )
+                    })?;
+                if id == 0 {
+                    return Err(format!(
+                        "channel \"{}\" has channel_id=0 which is reserved; use 1..",
+                        self.name
+                    ));
+                }
+                if !self.requests.is_empty() {
+                    return Err(format!(
+                        "channel \"{}\" has backend=\"datagram\" with request blocks; \
+                         datagram channels support event only (= no Request/Response)",
+                        self.name
+                    ));
+                }
+                Ok(())
+            }
+            ChannelBackend::Stream => Ok(()),
+        }
+    }
 }
 
 /// Service definition
