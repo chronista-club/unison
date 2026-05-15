@@ -10,6 +10,8 @@ pub mod cert;
 pub mod channel;
 pub mod client;
 pub mod context;
+pub mod datagram_channel;
+pub mod datagram_dispatcher;
 pub mod identity;
 pub mod mesh;
 pub mod quic;
@@ -18,7 +20,8 @@ pub mod trust;
 
 pub use cert::CertSource;
 pub use channel::UnisonChannel;
-pub use client::ProtocolClient;
+pub use client::{ClientConnectionEvent, ClientConnectionEventReceiver, ProtocolClient};
+pub use datagram_channel::DatagramChannel;
 pub use mesh::InternalMeshKeypair;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
 pub use server::{ConnectionEvent, ConnectionEventReceiver, ProtocolServer, ServerHandle};

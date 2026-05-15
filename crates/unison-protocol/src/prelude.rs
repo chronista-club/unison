@@ -11,8 +11,8 @@
 
 // パーサー関連
 pub use crate::parser::{
-    Channel, ChannelEvent, ChannelFrom, ChannelLifetime, ChannelMessage, ChannelRequest,
-    ParsedSchema, SchemaParser,
+    Channel, ChannelBackend, ChannelEvent, ChannelFrom, ChannelLifetime, ChannelMessage,
+    ChannelRequest, ParsedSchema, SchemaParser,
 };
 
 // Codec 関連
@@ -23,9 +23,11 @@ pub use crate::codegen::{CodeGenerator, RustGenerator, TypeScriptGenerator};
 
 // ネットワーク関連
 pub use crate::network::{
-    ConnectionEvent, ConnectionEventReceiver, ProtocolClient, ProtocolServer, ServerHandle,
-    UnisonChannel,
+    ConnectionEvent, ConnectionEventReceiver, DatagramChannel, ProtocolClient, ProtocolServer,
+    ServerHandle, UnisonChannel,
 };
+// v0.10.0: client-side connection event hook
+pub use crate::network::client::{ClientConnectionEvent, ClientConnectionEventReceiver};
 
 // エラー型
 pub use crate::network::NetworkError as UnisonNetworkError;

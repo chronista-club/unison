@@ -36,10 +36,22 @@ impl SchemaParser {
     }
 
     /// Parse a KDL schema string into a ParsedSchema
+    ///
+    /// パース後に [`Channel::validate`] を全 channel に対して呼び、 datagram channel の
+    /// `channel_id` 必須性等の semantic constraint を検証する。
     pub fn parse(&self, input: &str) -> Result<ParsedSchema> {
-        // unison-kdlを使ってパース
+        // club-kdlを使ってパース
         let schema: ParsedSchema =
             club_kdl::from_str(input).map_err(|e| anyhow::anyhow!("KDL parsing error: {}", e))?;
+
+        // Channel semantic validation (v0.10.0 で導入: datagram channel の channel_id 必須性等)
+        if let Some(ref protocol) = schema.protocol {
+            for channel in &protocol.channels {
+                channel
+                    .validate()
+                    .map_err(|msg| anyhow::anyhow!("Schema validation: {}", msg))?;
+            }
+        }
 
         Ok(schema)
     }
