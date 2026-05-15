@@ -7,9 +7,9 @@
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-05-15 — 「基盤整備」 release
+## [0.9.0] - 2026-05-15 — 「基盤整備 + buffa pivot」 release
 
-> v0.9.0 のテーマは **「ゴミ無し + 拡張準備 + 懸念点全解消」**。 deprecated API 削除、 全 dep の major bump、 dead code / dead dep 掃除、 wire format pluggable hook 導入、 spec/doc 同期を一括で実施。
+> v0.9.0 のテーマは **「ゴミ無し + wire format pivot + 懸念点全解消」**。 deprecated API 削除、 全 dep の major bump、 dead code / dead dep 掃除、 **wire format を rkyv 0.7 → buffa (Anthropic 製 protobuf) に乗り換え**、 spec/doc 同期を一括で実施。
 
 ### 削除 (Breaking)
 
@@ -18,6 +18,40 @@
   - 移行先: `configure_*_with(...)` 明示 API、 もしくは v0.8.0+ Builder API
 - **`unison-mcp-probe::ChannelListArgs` / `unison_channel_list` tool** — 「未実装、 サーバ側 meta API が必要」 note のみで実装ゼロだった placeholder を削除
 - **workspace dep `bincode`** — `unison-protocol` で宣言されていたが src 内 direct use ゼロの dead dep、 削除
+- **workspace dep `rkyv 0.7`** — buffa pivot で完全削除、 `Cargo.toml` / `crates/unison-protocol/Cargo.toml` から remove
+- **`crate::packet::Payloadable` trait + `RkyvPayload` / `BytesPayload` / `StringPayload` / `JsonPayload` / `EmptyPayload`** — rkyv 経由の generic payload abstraction を全削除 (= `packet/payload.rs` 廃止)
+- **`UnisonPacketHeader::SERIALIZED_SIZE` const** — buffa では header が variable-size になるため fixed const 廃止
+
+### Wire format pivot (Breaking)
+
+v0.8.x までの **rkyv 0.7 archive** から **buffa (Anthropic 製 Protocol Buffers)** に乗り換え。 詳細は [`design/wire-format.md`](https://github.com/chronista-club/club-unison/blob/main/design/wire-format.md) と [`spec/02-unified-channel/SPEC.md`](https://github.com/chronista-club/club-unison/blob/main/spec/02-unified-channel/SPEC.md) §8.4 参照。
+
+#### 旧 wire format (v0.8.x)
+
+```text
+[rkyv-encoded UnisonPacketHeader (56 bytes fixed)] [rkyv-encoded payload]
+```
+
+#### 新 wire format (v0.9.0+)
+
+```text
+[u32 BE header_len] [buffa-encoded PacketHeader] [payload bytes (may be zstd compressed)]
+```
+
+#### 主な API 変更
+
+- **`ProtocolMessage`** — 内部 wire を rkyv → buffa に切替、 PascalCase enum / 直 field access の caller API は保持
+- **`MessageType`** — `Request` / `Response` / `Event` / `Error` の PascalCase variant は維持 (wire 上は buffa `MessageType` enum の `REQUEST` / `RESPONSE` / `EVENT` / `ERROR` に写像)
+- **`UnisonPacket<T: Payloadable>` → `UnisonPacket` (非ジェネリック)** — caller が任意の codec で encode した `Vec<u8>` を渡す形に simplify
+- **`crate::proto`** — `proto/protocol.proto` から buffa-codegen された `ProtocolMessage` / `MessageType` / `PacketHeader` + zero-copy `*View` 型を expose
+- **wire の binary は v0.8 ↔ v0.9 で互換性なし** — v0.8.x client / server とは接続できない (= 双方 v0.9.0 に揃える必要)
+
+#### Pivot motivation
+
+- **polyglot 親和性**: rkyv は Rust 固有、 buffa は protobuf wire format で多言語 SDK 化が容易
+- **schema evolution**: protobuf の field number 互換性で前方/後方互換が取れる
+- **Anthropic ecosystem alignment**: buffa は Anthropic 製 protobuf、 club-unison が Claude / Anthropic 周辺 tool との接続を取りやすい
+- **rkyv 0.7 → 0.8 移行コスト回避**: 既存 packet 構造で rkyv major bump すると trait bound 地獄、 どうせ redesign するなら buffa pivot で済ませる判断
 
 ### 変更 (Breaking)
 
@@ -37,9 +71,11 @@
 
 ### 追加 (拡張準備)
 
-- **`crate::wire::WireFormat` trait** — wire format pluggable 抽象化 (v0.10+ で `RkyvWire` / `BuffaWire` / `MessagePackWire` の 3 実装拡張予定)
-- **`design/wire-format.md`** — wire format pluggable 設計 doc (= living doc)、 §5.2 datagram backend 引き継ぎ含む
-- **`spec/02-unified-channel` §8.4** — wire format pluggable hook 段落
+- **`proto/protocol.proto`** — buffa wire format core schema (`ProtocolMessage` / `MessageType` / `PacketHeader`)
+- **`crate::proto` module** — buffa-codegen 出力 (`$OUT_DIR/protocol.mod.rs`) を `include!` で expose、 main types + zero-copy `*View` + `__buffa::{ext,oneof,view}` まで一括
+- **`crate::wire::WireFormat` trait** — wire format pluggable 抽象化 hook (v0.10+ で `MessagePackWire` / `CborWire` 等を追加できる余地)
+- **`design/wire-format.md`** — wire format 設計 doc (= living doc)、 v0.9.0 buffa pivot 完了状態を反映、 §5 で v0.10+ 引き継ぎ
+- **`spec/02-unified-channel` §8.4** — wire format buffa 段落 (= layout / proto schema / WireFormat trait 拡張 hook)
 - **`spec/02-unified-channel` §8.5** — datagram MVP section (= QUIC unreliable / unordered、 ≤MTU、 3DCG transform 大量配信想定)
 - **`QuicClient::send_datagram` / `recv_datagram`** — datagram MVP API (= connection-level thin wrapper、 channel 抽象は v0.10+ で `event "X" backend="datagram"` schema 拡張と一緒に統合予定)
 - **`benches/ping_pong.rs`** — 1 req/1 resp round-trip latency baseline (payload 16 / 64 / 256 / 1024 B、 「通常の 1 リクエスト・レスポンス」 dogfood)
@@ -84,8 +120,8 @@ let server = QuicServer::builder(server)
 
 ### v0.10+ への引き継ぎ
 
-- `WireFormat` trait に `RkyvWire` / `BuffaWire` / `MessagePackWire` の具体実装追加
-- `ProtocolMessage` を format 非依存に redesign、 channel negotiation で wire format 選択
+- `WireFormat` trait に `MessagePackWire` / `CborWire` 等 buffa 以外の具体実装追加
+- `ProtocolMessage` を format 非依存に redesign (= buffa decoupling)、 channel negotiation で wire format 選択
 - benchmark living doc (= `design/bench-baseline.md`) を CI で auto regen、 release CI 自動化と組み合わせ (team-b dispatch 予定)
 - packet module 内の inline test を CI で初実走 (= v0.9.0 で `--skip packet` filter 撤去で初実走、 v0.10+ で coverage 拡大)
 

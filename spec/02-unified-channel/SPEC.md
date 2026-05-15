@@ -98,9 +98,14 @@ pub struct ProtocolMessage {
     pub id: u64,               // メッセージID（Requestは一意、Eventは0可）
     pub method: String,        // メソッド名（例: "Query", "MemoryEvent"）
     pub msg_type: MessageType, // メッセージ種別
-    pub payload: String,       // JSON 形式のペイロード
+    pub payload: Vec<u8>,      // Codec (JsonCodec / ProtoCodec 等) でエンコードされたペイロード
 }
 ```
+
+v0.9.0 buffa pivot 後、 `ProtocolMessage` は wire 上で buffa-encoded `proto::ProtocolMessage`
+(= `proto/protocol.proto` で定義) として運ばれる。 `payload` は caller が任意の
+codec で encode した raw bytes (= JsonCodec → JSON 文字列の bytes、 ProtoCodec →
+buffa-encoded bytes)。
 
 ### 3.3 Request/Response 相関
 
@@ -440,17 +445,43 @@ v0.7.0 以降、 TLS の cert / trust 戦略は **明示選択 API** (`CertSourc
 - チャネル間の独立性により並行処理を最大化
 - 非同期ランタイム (tokio) を通じた同時リクエストハンドリング
 
-### 8.4 Wire format (v0.9.0+ pluggable hook、 具体実装は v0.10+)
+### 8.4 Wire format (v0.9.0 で buffa pivot 完了、 trait 抽象は v0.10+ 拡張用 hook)
 
-v0.9.0 で `crate::wire::WireFormat` trait による wire format 抽象化を導入した。
-現時点の default wire format は [`crate::packet`] 経由の **rkyv archive** (zero-copy)。
-v0.10+ で以下の 3 実装が並ぶ予定:
+v0.9.0 で wire format を **rkyv 0.7 archive** から **buffa (Anthropic 製 Protocol
+Buffers)** に切り替えた (= breaking change、 詳細は [`CHANGELOG.md`](../../CHANGELOG.md))。
+理由:
 
-| 実装 | format | 用途 |
-|------|--------|------|
-| `RkyvWire` | rkyv archive | Rust 内 zero-copy hot path |
-| `BuffaWire` | Protocol Buffers (Anthropic 製 [`buffa`](https://crates.io/crates/buffa)) | polyglot, schema evolution |
-| `MessagePackWire` | MessagePack ([`zerompk`](https://crates.io/crates/zerompk) 等) | polyglot, コンパクト |
+- **polyglot 親和性**: rkyv は Rust 固有、 buffa は protobuf wire format で多言語 SDK 化が容易
+- **schema evolution**: protobuf の field number 互換性で前方/後方互換が取れる
+- **Anthropic ecosystem alignment**: buffa は Anthropic 製 protobuf、 club-unison が
+  Claude / Anthropic 周辺 tool との接続を取りやすい
+
+#### Wire format 概要
+
+```text
+[u32 BE header_len] [buffa-encoded PacketHeader] [payload bytes (may be zstd compressed)]
+```
+
+- 先頭 4 byte は header bytes 長 (big-endian u32)
+- header 部は [`proto::PacketHeader`](../../crates/unison-protocol/proto/protocol.proto)
+  を buffa でエンコードした可変長
+- payload 部の長さと圧縮状態は header の `payload_length` / `compressed_length` で表現
+- `compressed_length > 0` かつ `flags::COMPRESSED` 立ちで zstd 圧縮されているとみなす
+  (= 2KB 以上の payload は自動圧縮)
+
+旧 v0.8 系の rkyv 56-byte fixed header は v0.9.0 で **完全削除** された。
+
+#### `crate::wire::WireFormat` trait (拡張 hook)
+
+`crate::wire::WireFormat` trait は将来 (v0.10+) で **buffa 以外の wire format** を
+pluggable に追加する余地を確保するための表明。 v0.9.0 では具体実装は買わず、
+default の packet 経路 (= buffa direct) のみが稼働する。
+
+| 実装 | format | 想定用途 |
+|------|--------|---------|
+| (default) | buffa Protocol Buffers | v0.9.0+ の唯一の実装、 polyglot + schema evolution |
+| `MessagePackWire` (v0.10+) | MessagePack ([`zerompk`](https://crates.io/crates/zerompk) 等) | コンパクトな polyglot wire |
+| `CborWire` (v0.10+) | CBOR (`ciborium` 等) | IETF 標準互換 |
 
 設計詳細は [`design/wire-format.md`](../../design/wire-format.md) 参照。
 
