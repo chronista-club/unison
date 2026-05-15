@@ -20,7 +20,7 @@ pub mod trust;
 
 pub use cert::CertSource;
 pub use channel::UnisonChannel;
-pub use client::ProtocolClient;
+pub use client::{ClientConnectionEvent, ClientConnectionEventReceiver, ProtocolClient};
 pub use datagram_channel::DatagramChannel;
 pub use mesh::InternalMeshKeypair;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};

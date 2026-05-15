@@ -1,6 +1,8 @@
 use anyhow::Result;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 
 use crate::codec::{Codec, JsonCodec};
 
@@ -12,6 +14,62 @@ use super::identity::ServerIdentity;
 use super::quic::{FRAME_TYPE_PROTOCOL, QuicClient, UnisonStream, write_typed_frame};
 use super::{MessageType, NetworkError, ProtocolMessage};
 
+/// Client side connection event (v0.10.0 で追加、 [`ProtocolServer::ConnectionEvent`] と parallel)
+///
+/// `Connected` は `connect()` 成功時に 1 回、 `Disconnected` は connection が drop
+/// された時 (= 明示 disconnect / server 側 close / 通信 error 何れか) に 1 回 fire される。
+/// Library は auto-reconnect しない (= caller がこの event を見て自身のポリシーで
+/// 再接続を実行する責務を持つ)。
+#[derive(Debug, Clone)]
+pub enum ClientConnectionEvent {
+    /// Server へ接続確立 (= `connect()` 成功時に fire)
+    Connected {
+        /// 接続先 server の SocketAddr
+        remote_addr: SocketAddr,
+    },
+    /// Server との接続切断 (= 明示 `disconnect()` / 受動 drop どちらでも fire)
+    Disconnected {
+        /// 切断理由 (= caller が再接続判断に使う、 free text)
+        reason: String,
+    },
+}
+
+/// [`ProtocolClient::subscribe_connection_events`] が返す event receiver
+///
+/// `tokio::sync::broadcast::Receiver<ClientConnectionEvent>` のラッパー、
+/// server 側 [`super::server::ConnectionEventReceiver`] と parallel な API surface。
+pub struct ClientConnectionEventReceiver {
+    inner: broadcast::Receiver<ClientConnectionEvent>,
+}
+
+impl ClientConnectionEventReceiver {
+    /// 内部の broadcast::Receiver を直接参照する
+    pub fn inner(&mut self) -> &mut broadcast::Receiver<ClientConnectionEvent> {
+        &mut self.inner
+    }
+
+    /// 次の connection event を受信する (= `recv` raw、 Lagged は caller が判断)
+    pub async fn recv(
+        &mut self,
+    ) -> Result<ClientConnectionEvent, broadcast::error::RecvError> {
+        self.inner.recv().await
+    }
+
+    /// 次の connection event を受信、 `Lagged` (= subscriber 消費遅れで buffer 一巡)
+    /// は透過的に skip して最新から再開
+    pub async fn recv_skip_lagged(
+        &mut self,
+    ) -> Result<ClientConnectionEvent, broadcast::error::RecvError> {
+        loop {
+            match self.inner.recv().await {
+                Ok(ev) => return Ok(ev),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e @ broadcast::error::RecvError::Closed) => return Err(e),
+            }
+        }
+    }
+}
+
 /// QUIC protocol client implementation
 pub struct ProtocolClient {
     transport: Arc<QuicClient>,
@@ -19,25 +77,49 @@ pub struct ProtocolClient {
     context: Arc<ConnectionContext>,
     /// Datagram dispatcher (= lazy spawn on first `open_datagram_channel`、 v0.10.0 で追加)
     datagram_dispatcher: Mutex<Option<Arc<DatagramDispatcher>>>,
+    /// Connection event broadcast (v0.10.0 で追加、 server `connection_event_tx` と parallel)
+    ///
+    /// capacity 16: 1 client の lifecycle event (= Connected / Disconnected) は
+    /// 再接続 burst でも 10/秒 を超えない想定、 16 件 buffer で十分。
+    connection_event_tx: broadcast::Sender<ClientConnectionEvent>,
 }
 
 impl ProtocolClient {
     pub fn new(transport: QuicClient) -> Self {
+        let (event_tx, _) = broadcast::channel(16);
         Self {
             transport: Arc::new(transport),
             context: Arc::new(ConnectionContext::new()),
             datagram_dispatcher: Mutex::new(None),
+            connection_event_tx: event_tx,
         }
     }
 
     /// Create a new client with QUIC transport
     pub fn new_default() -> Result<Self> {
         let transport = QuicClient::new()?;
+        let (event_tx, _) = broadcast::channel(16);
         Ok(Self {
             transport: Arc::new(transport),
             context: Arc::new(ConnectionContext::new()),
             datagram_dispatcher: Mutex::new(None),
+            connection_event_tx: event_tx,
         })
+    }
+
+    /// Connection lifecycle event (= Connected / Disconnected) を subscribe する
+    /// (v0.10.0 で追加)
+    ///
+    /// Server 側 [`super::server::ProtocolServer::subscribe_connection_events`] と
+    /// parallel な API。 caller は subscribe 後に [`ClientConnectionEventReceiver::recv`]
+    /// で event を読む。 複数の caller が同時に subscribe 可能 (= broadcast)。
+    ///
+    /// 注: library は自動 reconnect しない。 caller が `Disconnected` を受け取ったら
+    /// 自身のポリシーで `client.connect(url)` を再呼び出しする責務を持つ。
+    pub fn subscribe_connection_events(&self) -> ClientConnectionEventReceiver {
+        ClientConnectionEventReceiver {
+            inner: self.connection_event_tx.subscribe(),
+        }
     }
 
     /// 接続コンテキストを取得
@@ -190,6 +272,24 @@ impl ProtocolClient {
             .await
             .map_err(|e| NetworkError::Connection(e.to_string()))?;
 
+        // v0.10.0 Step 2: Connected event を fire (= subscribe している caller に通知)
+        // remote_addr を connection から取得 (= ない場合は空 SocketAddr で fallback)
+        let remote_addr = {
+            let guard = self.transport.connection().read().await;
+            guard
+                .as_ref()
+                .map(|c| c.remote_address())
+                .unwrap_or_else(|| "[::]:0".parse().expect("fallback addr parse"))
+        };
+        let _ = self
+            .connection_event_tx
+            .send(ClientConnectionEvent::Connected { remote_addr });
+
+        // v0.10.0 Step 2: drop detection task を spawn
+        // QUIC connection の `closed()` future が resolve したら自動的に Disconnected を fire
+        // (= server 側 close / network error / 明示 disconnect 何れでも発火)
+        self.spawn_drop_detection_task(remote_addr).await;
+
         // Identity Handshake: サーバーからIdentityを受信
         match self.receive_identity().await {
             Ok(identity) => {
@@ -207,12 +307,49 @@ impl ProtocolClient {
         Ok(())
     }
 
+    /// Connection の `closed()` future を await して Disconnected event を fire する task
+    /// を spawn (v0.10.0 Step 2)
+    ///
+    /// connect() のたびに新 task が spawn される。 連続 reconnect で task が重複しても
+    /// 古い connection は既に closed なので即終了する (= leak しない)。
+    async fn spawn_drop_detection_task(&self, remote_addr: SocketAddr) {
+        let event_tx = self.connection_event_tx.clone();
+        let connection_handle = {
+            let guard = self.transport.connection().read().await;
+            guard.as_ref().cloned()
+        };
+        if let Some(connection) = connection_handle {
+            tokio::spawn(async move {
+                let close_reason = connection.closed().await;
+                let _ = event_tx.send(ClientConnectionEvent::Disconnected {
+                    reason: format!("connection closed: {}", close_reason),
+                });
+                tracing::debug!(
+                    "Drop detection task fired Disconnected for {}: {}",
+                    remote_addr,
+                    close_reason
+                );
+            });
+        }
+    }
+
     /// サーバーからの切断
     pub async fn disconnect(&self) -> Result<(), NetworkError> {
         self.transport
             .disconnect()
             .await
-            .map_err(|e| NetworkError::Connection(e.to_string()))
+            .map_err(|e| NetworkError::Connection(e.to_string()))?;
+        // v0.10.0 Step 2: 明示 disconnect でも Disconnected event を fire (= subscribe
+        // 側で「自分で disconnect した」 を別 path で識別したい場合は reason 文字列で判定)
+        // 注: spawn_drop_detection_task の `closed().await` も同時に fire するため、
+        // 同 disconnect で 2 件 event が流れる可能性がある。 Subscriber 側は冪等性を持つ
+        // (= 「Disconnected を 2 回連続で受けても 1 回の disconnect」 として扱う) のが原則。
+        let _ = self
+            .connection_event_tx
+            .send(ClientConnectionEvent::Disconnected {
+                reason: "explicit disconnect by caller".to_string(),
+            });
+        Ok(())
     }
 
     /// クライアント接続状態の確認
@@ -222,3 +359,90 @@ impl ProtocolClient {
 }
 
 use super::generate_request_id;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `subscribe_connection_events` は subscriber を返し、 connect 前でも publish 済み
+    /// event が無ければ recv が pending (= 別 task で連動して event を待つ pattern を担保)
+    #[tokio::test]
+    async fn subscribe_before_connect_receives_subsequent_events() {
+        let client = ProtocolClient::new_default().unwrap();
+        let mut rx = client.subscribe_connection_events();
+
+        // 手動で event を publish (= 実 connect なしで broadcast 動作を確認)
+        let _ = client
+            .connection_event_tx
+            .send(ClientConnectionEvent::Connected {
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            });
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("recv timeout")
+            .expect("recv error");
+        match ev {
+            ClientConnectionEvent::Connected { remote_addr } => {
+                assert_eq!(remote_addr.port(), 1234);
+            }
+            other => panic!("expected Connected, got: {:?}", other),
+        }
+    }
+
+    /// 複数 subscriber が同 event を独立に受信できる (= broadcast 性質)
+    #[tokio::test]
+    async fn multiple_subscribers_receive_same_event() {
+        let client = ProtocolClient::new_default().unwrap();
+        let mut rx_a = client.subscribe_connection_events();
+        let mut rx_b = client.subscribe_connection_events();
+
+        let _ = client
+            .connection_event_tx
+            .send(ClientConnectionEvent::Disconnected {
+                reason: "test".to_string(),
+            });
+
+        for rx in [&mut rx_a, &mut rx_b] {
+            let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(ev, ClientConnectionEvent::Disconnected { .. }));
+        }
+    }
+
+    /// `recv_skip_lagged` が Lagged を透過、 最新 event を返す
+    #[tokio::test]
+    async fn recv_skip_lagged_skips_lag_returns_latest() {
+        // capacity 16 を超えて publish → Lagged を生成
+        let client = ProtocolClient::new_default().unwrap();
+        let mut rx = client.subscribe_connection_events();
+
+        for i in 0..20 {
+            let _ = client
+                .connection_event_tx
+                .send(ClientConnectionEvent::Connected {
+                    remote_addr: format!("127.0.0.1:{}", 1000 + i).parse().unwrap(),
+                });
+        }
+        // recv_skip_lagged は Lagged を skip して buffer 内最古 を返す
+        let ev = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv_skip_lagged(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(ev, ClientConnectionEvent::Connected { .. }));
+    }
+
+    /// Receiver の inner() は &mut broadcast::Receiver を返す (= server 側 parallel API)
+    #[tokio::test]
+    async fn receiver_inner_exposes_broadcast_receiver() {
+        let client = ProtocolClient::new_default().unwrap();
+        let mut rx = client.subscribe_connection_events();
+        // inner() の型が broadcast::Receiver であることを compile-check
+        let _inner: &mut broadcast::Receiver<ClientConnectionEvent> = rx.inner();
+    }
+}

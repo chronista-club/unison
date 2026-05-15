@@ -26,6 +26,8 @@ pub use crate::network::{
     ConnectionEvent, ConnectionEventReceiver, DatagramChannel, ProtocolClient, ProtocolServer,
     ServerHandle, UnisonChannel,
 };
+// v0.10.0: client-side connection event hook
+pub use crate::network::client::{ClientConnectionEvent, ClientConnectionEventReceiver};
 
 // エラー型
 pub use crate::network::NetworkError as UnisonNetworkError;
