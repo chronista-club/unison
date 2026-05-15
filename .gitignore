@@ -59,3 +59,6 @@ crates/unison-protocol/assets/certs/*.der
 
 # Git worktrees
 .worktrees/
+
+# gitnexus local artifacts
+.gitnexus/
