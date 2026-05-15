@@ -7,6 +7,128 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-15 — 「channel API 拡張 + 対称性向上」 release
+
+> v0.10.0 のテーマは **「KDL channel narrative に datagram backend を統合 + ProtocolClient connection event hook で server 側との API 対称化」**。 v0.9.0 で発見された API 非対称 3 件 (= datagram server-side / client connection events / ClientIdentity) のうち 2 件を採用、 ClientIdentity は v0.11+ に deferred。 既存 v0.9.0 caller は 100% 無改修で動作 (= 純粋 additive release)。
+
+### 追加 — Datagram channel API 統合 (KDL schema 拡張)
+
+KDL channel に `backend="datagram"` + `channel_id=N` 属性を追加、 既存 `backend="stream"` (= v0.9.0 default) と並列に datagram channel を宣言可能に。 詳細設計は [`design/datagram-channel.md`](https://github.com/chronista-club/club-unison/blob/main/design/datagram-channel.md) と [`spec/02-unified-channel/SPEC.md`](https://github.com/chronista-club/club-unison/blob/main/spec/02-unified-channel/SPEC.md) §8.5。
+
+#### KDL syntax 例
+
+```kdl
+channel "position" from="server" lifetime="persistent" backend="datagram" channel_id=1 {
+    event "Transform" {
+        field "id" type="string"
+        field "pos" type="json"   // [x, y, z]
+        field "rot" type="json"   // [x, y, z, w]
+    }
+}
+```
+
+- `backend` 属性: `"stream"` (default、 v0.9.0 互換) / `"datagram"`
+- `channel_id` 属性: `backend="datagram"` 時のみ必須、 1..u64::MAX の正整数 (= proto3 field number 哲学、 author 明示割り当て)
+- 1 channel = 1 backend (strict)、 mixed event は disallow (= v0.11+ で再評価)
+- `backend="datagram"` channel は `request` ブロックを持てない (= unordered/unreliable で Request/Response 不適合、 `event` のみ許可)
+
+#### Wire format (datagram payload layout)
+
+```text
+[varint channel_id] [codec-encoded event payload]
+```
+
+- channel_id 1-127 は 1-byte varint prefix (= hot path 最小 overhead)
+- 128-16383 は 2-byte、 以降漸進的に増加 (= max 10 byte for u64::MAX)
+- 1 datagram = 1 event message、 chunking / fragmentation 不可、 MTU 超過は `SendDatagramError::TooLarge`
+
+#### Type / API
+
+- **`crate::network::DatagramChannel<C>`** — `UnisonChannel<C>` (= stream channel) と別型分離、 datagram-specific semantics を型レベルで表現
+- **`ProtocolServer::register_channel_datagram(name, channel_id, handler)`** — datagram channel handler 登録
+- **`ProtocolServer::broadcast(channel_name, event)`** — 全 active connection への best-effort broadcast、 戻り値 = 配送成功 connection 数
+- **`ProtocolClient::open_datagram_channel(name, channel_id)`** — datagram channel open (default codec = JsonCodec)
+- **`ProtocolClient::open_datagram_channel_with::<C>(name, channel_id)`** — 任意 codec 指定版
+- **`ProtocolServer::spawn_listen_shared(self: Arc<Self>)`** — broadcast 用 Arc 保持 spawn (= 既存 `spawn_listen(self)` は委譲、 backward compat)
+- **`ProtocolServer::active_connection_count()`** — 現在 active な接続数 (= test / debug 用)
+
+#### Parser / codegen 拡張
+
+- KDL parser: `Channel::backend()` / `Channel::channel_id` / `Channel::validate()` 追加、 `ChannelBackend` enum (`Stream` (default) / `Datagram`) 公開
+- Validation: `backend="datagram"` で `channel_id` 未指定 / `channel_id=0` / `request` 混在の 3 ケースで parse error
+- Rust codegen: `backend="datagram"` 検出時に `DatagramChannel` 型 + `client.open_datagram_channel(name, channel_id)` build call を出力 (= TypeScript generator は v0.11+ で対応予定)
+
+### 追加 — ProtocolClient connection event hook
+
+`ProtocolClient::subscribe_connection_events()` で connection lifecycle event を subscribe、 server 側 `ProtocolServer::subscribe_connection_events` と parallel な API。 v0.9.0 で発見された軽微 API 非対称の解消。
+
+```rust
+let mut rx = client.subscribe_connection_events();
+client.connect(url).await?;
+loop {
+    match rx.recv().await {
+        Ok(ClientConnectionEvent::Connected { remote_addr }) => { ... }
+        Ok(ClientConnectionEvent::Disconnected { reason }) => {
+            // caller がここで自分の reconnect policy で client.connect() を再呼び出し
+        }
+        Err(_) => break,
+    }
+}
+```
+
+#### API
+
+- **`ClientConnectionEvent` enum**: `Connected { remote_addr }` / `Disconnected { reason }`
+- **`ClientConnectionEventReceiver`** (= server 側 `ConnectionEventReceiver` と parallel、 `recv` / `recv_skip_lagged` / `inner` API)
+- `tokio::sync::broadcast` capacity 16、 複数 subscriber 対応
+- `connect()` 成功時に `Connected` fire + drop detection task spawn
+- `disconnect()` 時に explicit `Disconnected` fire (= reason `"explicit disconnect by caller"`)
+- QUIC connection drop (= server shutdown / network error) でも自動的に `Disconnected` fire (= `connection.closed().await` driven background task)
+
+#### Auto-reconnect の責務
+
+**Library は auto-reconnect しない**。 caller が `Disconnected` event を見て自身のポリシーで `client.connect(url)` を再呼び出しする責務を持つ。 backoff / circuit breaker / retry budget / jitter / dead letter handling のような戦略は caller の領域 (= chronista-club ecosystem 内で creo-memories は long-lived session 想定、 vantage-point は dashboard refresh 想定、 use case ごとに reconnect 期待値が異なるため)。
+
+### 内部
+
+- `crates/unison-protocol/src/network/datagram_channel.rs` 新規 (= type + varint encode/decode helpers、 LEB128 spec 準拠)
+- `crates/unison-protocol/src/network/datagram_dispatcher.rs` 新規 (= per-connection recv loop + `HashMap<channel_id, mpsc::Sender>` dispatch table)
+- `crates/unison-protocol/src/network/quic.rs::handle_connection` 拡張 (= dispatcher spawn + handler registration + active connections tracking、 datagram handler 不在の connection では dispatcher を spawn しない (= overhead 回避))
+- `crates/unison-protocol/src/network/server.rs` に datagram registry / broadcast / spawn_listen_shared 追加
+- `crates/unison-protocol/src/network/client.rs` に subscribe_connection_events / drop detection task / open_datagram_channel 追加
+- KDL parser に `ChannelBackend` enum + validate 拡張
+
+### Tests
+
+- unit tests: 198 → **202 passed / 0 failed** (= +4 client event tests)
+- integration tests (= `--ignored`): **7 件全 pass** (datagram echo / multi-channel demux / broadcast / connection event 4 種)
+- KDL parser tests: +8 (`backend` 属性検証)
+- Codegen tests: +2 (`DatagramChannel` 出力 + backward compat)
+- clippy clean (`--lib --workspace -- -D warnings`)
+
+### 移行ノート
+
+v0.9.0 → v0.10.0 は **wire 互換 + caller code 互換**:
+
+- 既存 stream channel KDL schema は無改修 (= `backend` 属性なしは `"stream"` default 解釈)
+- 既存 `ProtocolClient` / `ProtocolServer` caller は無改修 (= 新規 method は additive、 既存 method の signature 変更なし)
+- 既存 stream connection wire format は変更なし (= buffa-encoded packet 形式、 v0.9.0 と完全互換)
+- 新規 datagram channel を使う場合のみ:
+  1. KDL schema に `backend="datagram" channel_id=N` を追加
+  2. codegen を再実行
+  3. server 側で `register_channel_datagram` / `broadcast` を呼ぶ
+  4. client 側で `open_datagram_channel(name, channel_id)` を呼ぶ
+
+### v0.11+ への引き継ぎ
+
+- **ClientIdentity 概念**: 当初 v0.10.0 scope の 3rd task として候補、 v0.11+ deferred (= mTLS cert subject で 80% 代替可能、 caller use case 確定後に design 議論する healthy path、 memory `mem_1Cb46sKeeZvZSLmdWFgKVU`)
+- **Mixed backend channel**: 同 KDL channel に stream + datagram event を共存させる allow 化検討 (= v0.10.0 では strict、 forward-compatible に保持、 spec/02 §8.5 参照)
+- **Subscription model**: client が「subscribe」 宣言、 server side が filter で per-client filtering (= broadcast の上位概念)
+- **Datagram channel bench 拡充**: channel API 経由の demux overhead 計測、 既存 `benches/datagram.rs` (= connection-level MVP 計測) を channel-level に昇格
+- **TypeScript generator の datagram 対応**: v0.10.0 は rust generator のみ拡張、 polyglot SDK 要求が出た時点で TS も対応
+- **Auto-reconnect helper layer**: v0.10.0 で「caller 任せ」 を選択、 v0.11+ で opt-in な `client.auto_reconnect_with(BackoffPolicy)` 等の便利層追加検討 (= caller のポリシー奪取は意図的に避け続ける)
+- **`WireFormat::supports_datagram() -> bool` flag**: 将来 MessagePack / CBOR 等の wire format pluggable 化と一緒に
+
 ## [0.9.0] - 2026-05-15 — 「基盤整備 + buffa pivot」 release
 
 > v0.9.0 のテーマは **「ゴミ無し + wire format pivot + 懸念点全解消」**。 deprecated API 削除、 全 dep の major bump、 dead code / dead dep 掃除、 **wire format を rkyv 0.7 → buffa (Anthropic 製 protobuf) に乗り換え**、 spec/doc 同期を一括で実施。
