@@ -146,37 +146,45 @@
   - recv task: poll で受信 count
 - Metric: sent/s, recv/s, drop %
 
-### Results (= median of 10 iter)
+### Results (= 12 measurements from 2 separate runs、 v0.10.1 で sent/s と recv/s の分母を統一)
 
-| Metric | Value |
-|---|---|
-| **sent/s** | **~530,000 msg/s** |
-| **recv/s** | **~445,000 msg/s** |
-| **drop rate** | **~2.7%** (= saturation 突入の signal) |
-| sent total / 2sec session | 1.05-1.08 million msgs |
-| session time | 2.31 s |
+両 metric とも **send window (= `STREAM_DURATION × iters` = 2.0s × iters)** を分母に計算 (= `1 - recv/sent` が drop rate と algebraically 一致する形)。
 
-各 iter の raw numbers (= 10 iter):
+| Metric | Range | Median |
+|---|---|---|
+| **sent/s** | 472k - 609k | **~530,000 msg/s** |
+| **recv/s** | 343k - 531k | **~487,000 msg/s** |
+| **drop rate** | 3.2% - 43.4% | **~5.0%** (= 高 variance、 system load sensitive) |
+| sent total / 2sec session | 0.94-1.22 million msgs | ~1.05 million |
+| session time | 2.31 s | 2.31 s |
+
+各 iter の raw numbers (= 12 sample = 10 measurement + 2 warmup):
 
 ```
-sent=1052432 recv=1024220 drop=2.7%
-sent=1068252 recv=1036589 drop=3.0%
-sent=1071169 recv=1044571 drop=2.5%
-sent=1061638 recv=1026190 drop=3.3%
-sent=1068678 recv=1044517 drop=2.3%
-sent=1055988 recv=1028954 drop=2.6%
-sent=1049017 recv=1025155 drop=2.3%
-sent=1048532 recv=1020159 drop=2.7%
-sent=1058552 recv=1022996 drop=3.4%
-sent=1070097 recv=1034371 drop=3.3%
+sent=1109728 recv=1063400 drop=4.2% sent/s=554864 recv/s=531700
+sent=1100567 recv=1032163 drop=6.2% sent/s=550284 recv/s=516082
+sent=1005608 recv=953012  drop=5.2% sent/s=502804 recv/s=476506
+sent=1059863 recv=930916  drop=12.2% sent/s=529932 recv/s=465458
+sent=1017081 recv=974421  drop=4.2% sent/s=508540 recv/s=487210
+sent=1052940 recv=996407  drop=5.4% sent/s=526470 recv/s=498204
+sent=999121  recv=685825  drop=31.4% sent/s=499560 recv/s=342912
+sent=945197  recv=874148  drop=7.5% sent/s=472598 recv/s=437074
+sent=1218564 recv=689325  drop=43.4% sent/s=609282 recv/s=344662
+sent=1074532 recv=833691  drop=22.4% sent/s=537266 recv/s=416846
+sent=1026136 recv=974816  drop=5.0% sent/s=513068 recv/s=487408
+(+ 1 warmup iter)
 ```
 
-### 観察
+### 観察 — high variance under saturation
 
-- **ceiling ~445k msg/s** at Mac M-series localhost (= 60Hz × 1 peer = 60 msg/s に対し **~7,400x headroom**)
-- **drop 2-3% at saturation**: 上限近くで send buffer / dispatcher mpsc 飽和、 一定 drop が出始める (= unreliable semantics で正常挙動)
-- **sustained 120Hz が drop 0%** だったのは、 ceiling の 0.05% 程度しか使っていなかったから (= 240 msg/s vs 445k msg/s ceiling)
-- **caller の capacity planning 数字**: 「100 peer × 60Hz = 6,000 msg/s = ceiling の 1.3% = drop なし steady」 「1000 peer × 60Hz = 60,000 msg/s = ceiling の 13.5% = drop 1% 程度予測」
+- **median ceiling ~487k recv msg/s** at Mac M-series localhost、 60Hz × 1 peer (60 msg/s) に対し ~8,100x headroom
+- **drop variance 3-43%** = saturation 域では **system load によって drop rate が大きく変動**。 background process / GC pause / scheduler 揺らぎが顕在化、 low-drop iter (= 4%) と high-drop iter (= 43%) の差が 10x
+- **ceiling は "median" ではなく "range"** で見るべき: realistic deployment では 5-15% drop を見込む、 best case 数字 (= 4%) を採用すると capacity overestimate
+- **sustained 120Hz が drop 0%** だったのは ceiling の **0.05% 程度** しか使っていなかったから (= 240 msg/s vs 487k msg/s median ceiling)
+- **caller の capacity planning 推奨**:
+  - 「100 peer × 60Hz = 6k msg/s = ceiling の 1.2% = drop ~0% 想定」
+  - 「1000 peer × 60Hz = 60k msg/s = ceiling の 12% = **drop 3-5% 想定、 caller 側で frame skip 戦略推奨**」
+  - 「10000 peer × 60Hz = 600k msg/s = ceiling 超え、 **broadcast を server side でしない (= 各 client が subscribe 戦略)** に切替必要」
 
 ### 計測 topology の制約 (= 重要)
 

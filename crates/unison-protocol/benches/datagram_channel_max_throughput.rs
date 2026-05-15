@@ -165,9 +165,12 @@ fn bench_max_throughput(c: &mut Criterion) {
             } else {
                 0.0
             };
-            let sent_per_sec =
-                total_sent as f64 / (STREAM_DURATION.as_secs_f64() * iters as f64);
-            let recv_per_sec = total_received as f64 / elapsed.as_secs_f64();
+            // 両 metric を **同じ分母 (= STREAM_DURATION × iters)** で計算、 「send window
+            // 中の throughput」 を表す。 こうすると `1 - recv/sent` が drop rate と
+            // algebraically 一致、 reader の cognitive load 削減。
+            let send_window_secs = STREAM_DURATION.as_secs_f64() * iters as f64;
+            let sent_per_sec = total_sent as f64 / send_window_secs;
+            let recv_per_sec = total_received as f64 / send_window_secs;
             eprintln!(
                 "[max iters={}] sent={} server_recv={} client_recv={} drop={:.1}% sent/s={:.0} recv/s={:.0}",
                 iters,

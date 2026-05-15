@@ -23,11 +23,11 @@
 //!
 //! ## 設計 trade-off (= 既存 datagram.rs との 公平比較性)
 //!
-//! 両 bench は **per-iter で connection を新規 setup** する pattern (= bench 自体の
-//! reproducibility は良いが、 setup overhead が measurement に含まれる)。 raw bench との
-//! diff は概ね「setup + channel encode/decode + dispatcher routing」 の合計。 setup
-//! overhead が支配的だと channel-specific overhead が見えにくいが、 burst が大きい
-//! (= 1000) 側で channel encoding の cost が顕在化する想定。
+//! 両 bench は `iter_custom` で **1 connection を全 iter で共有する steady-state**
+//! pattern (= setup overhead を measurement から除外、 v0.10.1 で cold-start per-iter
+//! から切替、 macOS の ephemeral port / fd 枯渇問題を回避)。 raw bench との diff は
+//! 概ね「channel encode/decode + dispatcher routing + JSON cost」 の合計、 burst 1000
+//! で JSON encoding の cost が顕在化する想定。
 
 use club_unison::{ProtocolClient, ProtocolServer};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
