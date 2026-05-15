@@ -11,6 +11,7 @@ pub mod channel;
 pub mod client;
 pub mod context;
 pub mod datagram_channel;
+pub mod datagram_dispatcher;
 pub mod identity;
 pub mod mesh;
 pub mod quic;
