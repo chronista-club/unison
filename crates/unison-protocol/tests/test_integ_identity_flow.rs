@@ -47,9 +47,15 @@ async fn test_integ_identity_build_and_frame() {
     // 「先頭 4 byte (= header_len prefix) + header body + payload」 が乗っていることを確認
     let frame = msg.into_frame().unwrap();
     let bytes = frame.to_bytes();
-    assert!(bytes.len() > 4, "packet should at least contain header_len prefix");
+    assert!(
+        bytes.len() > 4,
+        "packet should at least contain header_len prefix"
+    );
     let header = frame.header().unwrap();
-    assert!(header.payload_length > 0, "identity payload should be non-empty");
+    assert!(
+        header.payload_length > 0,
+        "identity payload should be non-empty"
+    );
 }
 
 #[test]

@@ -19,11 +19,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use thiserror::Error;
 use zstd::stream::{decode_all, encode_all};
 
-use super::{
-    config::PacketConfig,
-    flags::PacketFlags,
-    header::UnisonPacketHeader,
-};
+use super::{config::PacketConfig, flags::PacketFlags, header::UnisonPacketHeader};
 use crate::proto;
 
 /// シリアライゼーションエラー
@@ -109,7 +105,9 @@ impl PacketSerializer {
         let header_bytes = header.to_proto().encode_to_vec();
         let header_len = header_bytes.len();
         if header_len > u32::MAX as usize {
-            return Err(SerializationError::HeaderLengthOutOfRange(header_len as u64));
+            return Err(SerializationError::HeaderLengthOutOfRange(
+                header_len as u64,
+            ));
         }
 
         // wire format: [u32 BE header_len] [header bytes] [payload bytes]
@@ -131,8 +129,7 @@ impl PacketSerializer {
 
     /// ペイロードを圧縮
     fn compress(data: &[u8], level: i32) -> Result<Vec<u8>, SerializationError> {
-        encode_all(data, level)
-            .map_err(|e| SerializationError::CompressionFailed(e.to_string()))
+        encode_all(data, level).map_err(|e| SerializationError::CompressionFailed(e.to_string()))
     }
 }
 
@@ -141,14 +138,11 @@ pub struct PacketDeserializer;
 
 impl PacketDeserializer {
     /// パケットのヘッダーだけを取り出す (payload bytes 部分は touch しない)
-    pub fn parse_header_only(
-        bytes: &[u8],
-    ) -> Result<UnisonPacketHeader, SerializationError> {
+    pub fn parse_header_only(bytes: &[u8]) -> Result<UnisonPacketHeader, SerializationError> {
         if bytes.len() < 4 {
             return Err(SerializationError::InvalidHeader);
         }
-        let header_len =
-            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let header_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         if bytes.len() < 4 + header_len {
             return Err(SerializationError::InvalidHeader);
         }
@@ -166,14 +160,11 @@ impl PacketDeserializer {
     }
 
     /// パケット全体をパースし、 ヘッダーと (必要なら解凍済みの) payload を返す
-    pub fn parse(
-        bytes: &[u8],
-    ) -> Result<(UnisonPacketHeader, Vec<u8>), SerializationError> {
+    pub fn parse(bytes: &[u8]) -> Result<(UnisonPacketHeader, Vec<u8>), SerializationError> {
         if bytes.len() < 4 {
             return Err(SerializationError::InvalidHeader);
         }
-        let header_len =
-            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let header_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         if bytes.len() < 4 + header_len {
             return Err(SerializationError::InvalidHeader);
         }
