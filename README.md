@@ -10,7 +10,7 @@ KDL スキーマベースの型安全な QUIC 通信フレームワーク。
 [dependencies]
 # crates.io package = `club-unison`、Rust crate identifier = `club_unison`
 club-unison = "^0.9"
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 ```
 
 ```rust

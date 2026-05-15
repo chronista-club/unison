@@ -174,7 +174,8 @@ impl ServerHandler for UnisonProbe {
     fn get_info(&self) -> ServerInfo {
         // rmcp 1.x: ServerInfo / Implementation は #[non_exhaustive]、 builder API 経由で構築。
         // Implementation の name/version は `serve()` 時に CARGO_PKG_NAME / CARGO_PKG_VERSION から
-        // auto-fill されるので、 ここでは capabilities + instructions のみ明示する。
+        // auto-fill される。 protocol_version は省略時 rmcp 1.x の default (= 現状 V_2024_11_05) が
+        // 採用される、 strict client との negotiation で問題が出たら明示 set し直す (v0.10+ で確認予定)。
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "Unison Protocol サーバをつつくための MCP probe。開発中の Unison endpoint を指定して使う。",
