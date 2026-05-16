@@ -65,7 +65,7 @@ schemars = "1"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.23", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "v7", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"

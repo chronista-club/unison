@@ -10,6 +10,10 @@
  * See `design/typescript-client-api.md` for the API contract this package will satisfy.
  */
 
+// === Phase 5: error category framework (UNS-15) ===
+export type { ErrorCategory } from "./error/category.js";
+export { ERROR_CATEGORIES } from "./error/category.js";
+
 // === Phase 2b: transport === (= 実装中)
 export type {
   BidiStream,

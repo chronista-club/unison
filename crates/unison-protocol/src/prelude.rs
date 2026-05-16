@@ -30,6 +30,7 @@ pub use crate::network::{
 pub use crate::network::client::{ClientConnectionEvent, ClientConnectionEventReceiver};
 
 // エラー型
+pub use crate::network::ErrorCategory;
 pub use crate::network::NetworkError as UnisonNetworkError;
 pub use crate::parser::ParseError as UnisonParseError;
 

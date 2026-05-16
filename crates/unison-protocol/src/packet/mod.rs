@@ -178,6 +178,20 @@ impl UnisonPacketBuilder {
         self
     }
 
+    /// 相関IDを設定（リクエスト追跡用、UUID v7）
+    pub fn with_correlation_id(mut self, id: uuid::Uuid) -> Self {
+        self.header.correlation_id = Some(id);
+        self
+    }
+
+    /// 新しい相関ID（UUID v7）を生成して設定
+    ///
+    /// クライアントが request 起点で呼び、packet flow に伝播させる。
+    pub fn with_new_correlation_id(mut self) -> Self {
+        self.header = self.header.with_new_correlation_id();
+        self
+    }
+
     /// 高優先度フラグを設定
     pub fn with_high_priority(mut self) -> Self {
         let mut flags = self.header.flags();

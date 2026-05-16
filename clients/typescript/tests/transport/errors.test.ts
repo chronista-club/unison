@@ -16,4 +16,9 @@ describe("WebTransportUnsupportedError", () => {
     expect(err.name).toBe("WebTransportUnsupportedError");
     expect(err.message).toMatch(/WebTransport/);
   });
+
+  it("is categorized as a transport error", () => {
+    const err = new WebTransportUnsupportedError();
+    expect(err.category).toBe("transport");
+  });
 });
