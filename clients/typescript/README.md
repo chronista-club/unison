@@ -3,7 +3,7 @@
 > TypeScript client SDK for the [Unison protocol](https://github.com/chronista-club/club-unison).
 > Part of the **v1.0 polyglot client base** (= server stays Rust, client polyglot for adoption surface).
 
-**Status**: `1.0.0-alpha.1` — early development. API not yet stable, see [design/typescript-client-api.md](../../design/typescript-client-api.md) for the SDK design contract.
+**Status**: `1.0.0-alpha.2` — v1.0 sprint feature-complete. The SDK genuinely talks to the Rust server over **real WebTransport** (verified by `tests/integration/webtransport_e2e.test.ts`). See [design/typescript-client-api.md](../../design/typescript-client-api.md) for the SDK design contract.
 
 ---
 
@@ -16,55 +16,76 @@ Unison is a KDL schema-driven, QUIC-based protocol with both **stream channels**
 
 The asymmetric design — **fat Rust server, thin polyglot clients** — keeps complexity (TLS, accept loops, connection management) in one language while broadening the adoption surface.
 
-## v1.0 roadmap (= what's coming)
+## v1.0 status (= what shipped)
 
-This SDK is being built in phases:
+The v1.0 sprint is feature-complete. All phases are done:
 
-- **Phase 1** ✅ — KDL-driven TypeScript code generation (= type interfaces + channel metadata)
-- **Phase 2a** ✅ — Package skeleton (= this file's commit point)
-- **Phase 2b** — WebTransport transport adapter
-- **Phase 2c** — Channel wrappers (`UnisonChannel<M>` / `DatagramChannel<M>` TS port)
-- **Phase 2d** — Codecs (`JsonCodec` + `ProtoCodec` via `@bufbuild/protobuf`)
-- **Phase 2e** — Tests + bundle build (= ≤ 200 KB minified gzipped target)
-- **Phase 3b** — First proof point demo (= Vantage Point dashboard subscribe)
-- **Phase 4-7** — CLI tools, error code framework, docs, CI integration tests
-- **v1.0.0-rc.1** — Dogfood phase across chronista-club ecosystem
-- **v1.0.0** — Stability commitment (= dogfood exit criteria: 3+ caller × 3+ months × critical bug 0)
+- **Phase 1** ✅ — KDL-driven TypeScript code generation (type interfaces + channel metadata)
+- **Phase 2a-e** ✅ — Package skeleton, WebTransport transport adapter, channel wrappers
+  (`UnisonChannel<M>` / `DatagramChannel<M>`), codecs (`JsonCodec` + `ProtoCodec`), tests + bundle build
+- **Phase 3** ✅ — `connect()` facade + Vantage Point dashboard proof point demo
+- **Phase 4-5** ✅ — `unison` developer CLI (ping / sniff / mock / schema-lint), `ErrorCategory` framework
+- **Phase 6** ✅ — Rust-compatible wire format + **real WebTransport E2E** (TS SDK ↔ Rust server)
+- **Phase 7** ✅ — Cross-language E2E integration tests in CI
+- **Phase 8** ✅ — User-facing docs (this file + the guides below)
+
+What is **v1.x deferred** (honest gaps):
+
+- TypeScript codegen for datagram channels (Rust codegen has it; TS handwrites the meta for now)
+- proto-descriptor codegen (`ProtoCodec` works, but KDL → descriptor generation is not automated)
+- Node native WebTransport (Node needs the `@fails-components/webtransport` polyfill)
+- Safari / Firefox WebTransport (Chromium-based browsers are the official support matrix)
+- per-channel codec override, auto-reconnect helper
 
 See [`design/typescript-client-api.md`](../../design/typescript-client-api.md) for the full API design contract.
 
-## Quickstart (= will be filled in as Phase 2b/c/d/e land)
+## Quickstart
+
+For the full end-to-end walkthrough (KDL schema → Rust server → TS client), see
+[`guides/quickstart.md`](../../guides/quickstart.md). API reference:
+[`guides/typescript-sdk.md`](../../guides/typescript-sdk.md).
 
 ```typescript
-// ❗ This API is aspirational — Phase 2 implementation in progress.
-// See design doc for the contract that this code will satisfy.
+import { connect, type ChannelMeta } from "@chronista-club/unison-client";
 
-import { unisonClient } from "@chronista-club/unison-client";
-import { MetricChannelMeta, type MetricUpdate } from "./generated/vp-protocol";
+const EchoMeta = {
+  name: "echo",
+  backend: "stream",
+  from: "client",
+  lifetime: "persistent",
+  events: [],
+  requests: { Echo: { request: "EchoReq", response: "EchoResp" } },
+} as const satisfies ChannelMeta;
 
-const client = await unisonClient.connect({
-  url: "https://vp.chronista.local:8080",
-  trust: "system",
+// Connect — cert pinning for a dev self-signed server (loopback only).
+const client = await connect({
+  url: "https://127.0.0.1:4439",
+  trust: { certHash: "<CERT_HASH printed by the server>" },
+  awaitIdentity: false,
 });
 
-const metricChan = await client.openDatagramChannel(MetricChannelMeta);
+const echo = await client.openChannel(EchoMeta);
+const reply = await echo.request("Echo", { text: "hello-unison" });
+console.log(reply); // { text: "hello-unison" }
 
-for await (const update of metricChan.events()) {
-  // update is typed as MetricUpdate (= via ChannelMeta type narrowing)
-  dashboardStore.set(update.name, update.value);
-}
+await echo.close();
+await client.disconnect();
 ```
 
-## Architecture (= preview)
+## Architecture
 
 ```
 clients/typescript/
 ├── src/
-│   ├── index.ts           ← public entry (= Phase 2a 雛形、 Phase 2b- で fill)
-│   ├── transport/         ← WebTransport adapter (= Phase 2b)
-│   ├── channel/           ← Channel wrappers (= Phase 2c)
-│   └── codec/             ← JsonCodec + ProtoCodec (= Phase 2d)
-├── tests/                 ← vitest unit + integration tests (= Phase 2e)
+│   ├── index.ts           ← public entry (= re-exports the surface below)
+│   ├── client.ts          ← connect() + UnisonClient facade
+│   ├── transport/         ← WebTransport adapter
+│   ├── channel/           ← UnisonChannel / DatagramChannel + dispatcher + frame
+│   ├── codec/             ← JsonCodec + ProtoCodec
+│   ├── wire/              ← Rust-compatible packet / protocol-message encode/decode
+│   └── error/             ← ErrorCategory framework
+├── examples/              ← vp-dashboard.ts (Vantage Point proof point demo)
+├── tests/                 ← vitest unit + integration tests (incl. real WebTransport E2E)
 ├── package.json
 ├── tsconfig.json
 ├── vite.config.ts
@@ -84,10 +105,10 @@ npm run typecheck      # tsc --noEmit (= type safety verification)
 ## Versioning policy
 
 - TS package version is kept in **major.minor sync** with the Rust crate `club-unison`
-- `1.0.0-alpha.x` — Phase 2 implementation in progress, breaking changes allowed
-- `1.0.0-beta.x` — Phase 2 complete, API freeze candidates, refinement only
-- `1.0.0-rc.x` — Feature complete, dogfood phase with chronista-club ecosystem
-- `1.0.0` — Stability commitment, breaking changes require v2.0
+- `1.0.0-alpha.x` — implementation phases, breaking changes allowed (current)
+- `1.0.0-rc.x` — feature complete, dogfood phase with the chronista-club ecosystem
+- `1.0.0` — stability commitment, breaking changes require v2.0
+  (dogfood exit criteria: 3+ caller × 3+ months × critical bug 0)
 
 ## Compatibility
 
