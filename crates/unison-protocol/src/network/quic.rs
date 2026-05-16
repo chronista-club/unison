@@ -840,7 +840,7 @@ pub(crate) async fn handle_connection(
                     {
                         warn!("Failed to send identity: {}", e);
                     } else {
-                        let _ = send_stream.finish();
+                        let _ = send_stream.finish().await;
                         info!("Identity sent to client");
                     }
                 }
@@ -974,11 +974,15 @@ pub(crate) async fn handle_connection(
 /// `quinn::SendStream` は `tokio::io::AsyncWrite` を実装済みなので、 `finish`
 /// だけ橋渡しすればよい。
 impl UnisonSend for SendStream {
-    fn finish(&mut self) -> Result<(), NetworkError> {
-        // 二重 finish (= ClosedStream) は正常終了扱いにする (= 冪等)。
-        match SendStream::finish(self) {
+    fn finish(
+        &mut self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), NetworkError>> + Send + '_>> {
+        // quinn の finish は同期。 trait の async シグネチャに合わせて即解決する
+        // future で包む。 二重 finish (= ClosedStream) は正常終了扱い (= 冪等)。
+        let result = match SendStream::finish(self) {
             Ok(()) | Err(quinn::ClosedStream { .. }) => Ok(()),
-        }
+        };
+        Box::pin(async move { result })
     }
 }
 
@@ -1189,7 +1193,7 @@ impl UnisonStream {
         self.is_active.store(false, Ordering::SeqCst);
 
         if let Some(mut send_stream) = self.send_stream.lock().await.take() {
-            send_stream.finish()?;
+            send_stream.finish().await?;
         }
 
         if let Some(mut recv_stream) = self.recv_stream.lock().await.take() {

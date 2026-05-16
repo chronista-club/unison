@@ -489,6 +489,102 @@ impl ProtocolServer {
             local_addr,
         })
     }
+
+    /// WebTransport ingress を起動する (= ブラウザクライアント受け口、 Phase 6a)。
+    ///
+    /// raw QUIC の [`listen`](Self::listen) と並立する。 受け付けた接続は raw QUIC
+    /// と **同一の** `handle_connection` へ流れるため、 `register_channel` で登録
+    /// したハンドラーは transport を問わず動作する。
+    ///
+    /// `addr` は `SocketAddr` 文字列 (例: `"[::]:4433"`)。 `cert_source` は raw
+    /// QUIC 側と共有でき、 TLS 信頼モデルを 2 ingress で統一できる。
+    ///
+    /// **注意**: self を消費するため、 `subscribe_connection_events()` は事前に。
+    pub async fn listen_webtransport(
+        self,
+        addr: &str,
+        cert_source: super::cert::CertSource,
+    ) -> Result<(), NetworkError> {
+        use super::webtransport::WebTransportServer;
+
+        let socket_addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| NetworkError::Quic(format!("WebTransport bind addr parse 失敗: {}", e)))?;
+
+        let protocol_server = Arc::new(self);
+        protocol_server.running.store(true, Ordering::SeqCst);
+
+        let mut wt_server = WebTransportServer::new(Arc::clone(&protocol_server), cert_source);
+        wt_server
+            .bind(socket_addr)
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()))?;
+
+        tracing::info!(
+            "Unison Protocol server listening on {} via WebTransport",
+            addr
+        );
+
+        let result = wt_server
+            .start()
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()));
+
+        protocol_server.running.store(false, Ordering::SeqCst);
+        result
+    }
+
+    /// バックグラウンドで WebTransport ingress を起動し、 [`ServerHandle`] を返す。
+    ///
+    /// [`spawn_listen`](Self::spawn_listen) の WebTransport 版。 raw QUIC ingress と
+    /// 同時に走らせたい場合は、 `Arc<Self>` を共有して両方を spawn すればよい。
+    pub async fn spawn_listen_webtransport(
+        self: Arc<Self>,
+        addr: &str,
+        cert_source: super::cert::CertSource,
+    ) -> Result<ServerHandle, NetworkError> {
+        use super::webtransport::WebTransportServer;
+
+        let socket_addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| NetworkError::Quic(format!("WebTransport bind addr parse 失敗: {}", e)))?;
+
+        let protocol_server = self;
+
+        let mut wt_server = WebTransportServer::new(Arc::clone(&protocol_server), cert_source);
+        wt_server
+            .bind(socket_addr)
+            .await
+            .map_err(|e| NetworkError::Quic(e.to_string()))?;
+
+        let local_addr = wt_server
+            .local_addr()
+            .ok_or_else(|| NetworkError::Quic("WebTransport server not bound".to_string()))?;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        protocol_server.running.store(true, Ordering::SeqCst);
+
+        tracing::info!(
+            "Unison Protocol server spawned on {} via WebTransport",
+            local_addr
+        );
+
+        let server_clone = Arc::clone(&protocol_server);
+        let join_handle = tokio::spawn(async move {
+            let result = wt_server
+                .start_with_shutdown(shutdown_rx)
+                .await
+                .map_err(|e| NetworkError::Quic(e.to_string()));
+            server_clone.running.store(false, Ordering::SeqCst);
+            result
+        });
+
+        Ok(ServerHandle {
+            join_handle,
+            shutdown_tx: Some(shutdown_tx),
+            local_addr,
+        })
+    }
 }
 
 impl Default for ProtocolServer {

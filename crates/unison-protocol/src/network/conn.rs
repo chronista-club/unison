@@ -29,18 +29,24 @@ use super::NetworkError;
 
 /// 送信ストリーム — `AsyncWrite` + FIN 送出。
 ///
-/// `quinn::SendStream` の `finish()` 相当を抽象化する。
+/// `quinn::SendStream` / `wtransport::SendStream` の `finish()` 相当を抽象化する。
+///
+/// `finish` を async にしている理由: `quinn` の `finish` は同期だが
+/// `wtransport` の `finish` は async (= HTTP/3 capsule の flush を伴う)。 両方を
+/// 同一 trait で扱うため async に統一する。
 pub trait UnisonSend: AsyncWrite + Send + Unpin {
     /// ストリームに FIN を送出して正常終了させる。
     ///
     /// QUIC ではピアに「これ以上データは来ない」を通知する。 冪等であること
     /// を期待する (= 二重 `finish` はエラーにしない)。
-    fn finish(&mut self) -> Result<(), NetworkError>;
+    fn finish(
+        &mut self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), NetworkError>> + Send + '_>>;
 }
 
 /// 受信ストリーム — `AsyncRead` + STOP 送出。
 ///
-/// `quinn::RecvStream` の `stop()` 相当を抽象化する。
+/// `quinn::RecvStream` / `wtransport::RecvStream` の `stop()` 相当を抽象化する。
 pub trait UnisonRecv: AsyncRead + Send + Unpin {
     /// ストリームの受信側を停止し、 ピアへ STOP_SENDING を送出する。
     fn stop(&mut self) -> Result<(), NetworkError>;

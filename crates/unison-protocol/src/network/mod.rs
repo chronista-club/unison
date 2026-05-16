@@ -18,6 +18,7 @@ pub mod mesh;
 pub mod quic;
 pub mod server;
 pub mod trust;
+pub mod webtransport;
 
 pub use cert::CertSource;
 pub use channel::UnisonChannel;
@@ -28,6 +29,7 @@ pub use mesh::InternalMeshKeypair;
 pub use quic::{QuicClient, QuicServer, TypedFrame, UnisonStream};
 pub use server::{ConnectionEvent, ConnectionEventReceiver, ProtocolServer, ServerHandle};
 pub use trust::TrustAnchors;
+pub use webtransport::WebTransportServer;
 
 /// グローバルなリクエストID生成（モジュール間で一意）
 pub(crate) fn generate_request_id() -> u64 {

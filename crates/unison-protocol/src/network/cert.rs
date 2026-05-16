@@ -102,6 +102,66 @@ impl CertSource {
             } => load_from_files(&cert_path, &key_path),
         }
     }
+
+    /// Resolve this source into raw DER material — `(cert chain DER, PKCS#8 key DER)`.
+    ///
+    /// `wtransport` の [`Identity`](wtransport::Identity) は rustls の
+    /// `CertifiedKey` ではなく DER バイト列を要求するため、 WebTransport ingress
+    /// (Phase 6a) はこのメソッドで TLS マテリアルを取り出して `cert.rs` と
+    /// 信頼モデルを共有する。
+    ///
+    /// # Limitations
+    ///
+    /// [`Self::Provided`] は `CertifiedKey` 内に秘密鍵 DER を保持しておらず
+    /// (rustls の `SigningKey` は DER を露出しない)、 このメソッドはエラーを
+    /// 返す。 WebTransport で in-memory cert を使う場合は [`Self::FromFile`] か
+    /// [`Self::SelfSigned`] を使うこと。
+    pub fn resolve_der(&self) -> Result<(Vec<Vec<u8>>, Vec<u8>)> {
+        match self {
+            Self::SelfSigned { subject_alt_names } => {
+                let cert_key = rcgen::generate_simple_self_signed(subject_alt_names.clone())
+                    .context("rcgen failed to generate self-signed certificate")?;
+                let cert_der = cert_key.cert.der().to_vec();
+                let key_der = cert_key.signing_key.serialize_der();
+                Ok((vec![cert_der], key_der))
+            }
+            Self::FromFile {
+                cert_path,
+                key_path,
+            } => {
+                let cert_pem = std::fs::read_to_string(cert_path).with_context(|| {
+                    format!("failed to read cert file: {}", cert_path.display())
+                })?;
+                let key_pem_bytes = std::fs::read(key_path)
+                    .with_context(|| format!("failed to read key file: {}", key_path.display()))?;
+
+                let certs: Vec<Vec<u8>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .with_context(|| {
+                        format!("failed to parse cert PEM: {}", cert_path.display())
+                    })?
+                    .into_iter()
+                    .map(|c| c.to_vec())
+                    .collect();
+                if certs.is_empty() {
+                    anyhow::bail!("no certificates found in {}", cert_path.display());
+                }
+
+                let key = rustls_pemfile::private_key(&mut key_pem_bytes.as_slice())
+                    .with_context(|| {
+                        format!("failed to parse key PEM: {}", key_path.display())
+                    })?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("no private key found in {}", key_path.display())
+                    })?;
+                Ok((certs, key.secret_der().to_vec()))
+            }
+            Self::Provided { .. } => anyhow::bail!(
+                "CertSource::Provided は秘密鍵 DER を保持しないため WebTransport では \
+                 使用できません。FromFile または SelfSigned を使ってください"
+            ),
+        }
+    }
 }
 
 /// Generate a self-signed cert + key pair and wrap as [`CertifiedKey`].
