@@ -52,7 +52,11 @@ pub fn run(args: SchemaLintArgs) -> Result<()> {
         report_summary(&schema);
         Ok(())
     } else {
-        eprintln!("✗ {}: {} invariant violation(s)", args.file.display(), warnings.len());
+        eprintln!(
+            "✗ {}: {} invariant violation(s)",
+            args.file.display(),
+            warnings.len()
+        );
         for w in &warnings {
             eprintln!("  - {w}");
         }

@@ -1,9 +1,9 @@
 mod common;
 
+use serde_json::Value;
 use unison::context::handlers::{CompositeHandler, EchoHandler, PingHandler};
 use unison::context::{HandlerRegistry, MessageDispatcher};
 use unison::network::{MessageType, NetworkError, ProtocolMessage};
-use serde_json::Value;
 
 /// PingHandler を登録 → ProtocolMessage で dispatch → "Pong: ..." レスポンス検証
 #[tokio::test]

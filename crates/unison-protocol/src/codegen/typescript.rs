@@ -188,7 +188,11 @@ export type LanguageCode = string; // ISO 639-1 format
         } else {
             code.push_str(&format!("export interface {} {{\n", request_types_name));
             for (req_name, req_type, resp_type) in &request_mappings {
-                let resp_ts = if resp_type == "void" { "void" } else { resp_type };
+                let resp_ts = if resp_type == "void" {
+                    "void"
+                } else {
+                    resp_type
+                };
                 code.push_str(&format!(
                     "  {}: {{ request: {}; response: {} }};\n",
                     req_name, req_type, resp_ts
@@ -199,7 +203,10 @@ export type LanguageCode = string; // ISO 639-1 format
 
         // Channel metadata const (= Phase 2 runtime SDK の type-narrowing 入力)
         let meta_name = format!("{}ChannelMeta", pascal);
-        code.push_str(&format!("/** Channel metadata for \"{}\" (= Phase 2 runtime SDK 用 type-narrowing 入力) */\n", channel.name));
+        code.push_str(&format!(
+            "/** Channel metadata for \"{}\" (= Phase 2 runtime SDK 用 type-narrowing 入力) */\n",
+            channel.name
+        ));
         code.push_str(&format!("export const {} = {{\n", meta_name));
         code.push_str(&format!("  name: {:?} as const,\n", channel.name));
         code.push_str(&format!("  backend: {:?} as const,\n", backend_str));
@@ -264,11 +271,7 @@ export type LanguageCode = string; // ISO 639-1 format
     }
 
     /// Channel 内 event を TS interface に変換
-    fn generate_channel_event(
-        &self,
-        event: &ChannelEvent,
-        type_registry: &TypeRegistry,
-    ) -> String {
+    fn generate_channel_event(&self, event: &ChannelEvent, type_registry: &TypeRegistry) -> String {
         let name = &event.name;
         if event.fields.is_empty() {
             format!(

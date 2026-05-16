@@ -141,9 +141,7 @@ impl CertSource {
 
                 let certs: Vec<Vec<u8>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .with_context(|| {
-                        format!("failed to parse cert PEM: {}", cert_path.display())
-                    })?
+                    .with_context(|| format!("failed to parse cert PEM: {}", cert_path.display()))?
                     .into_iter()
                     .map(|c| c.to_vec())
                     .collect();
@@ -152,9 +150,7 @@ impl CertSource {
                 }
 
                 let key = rustls_pemfile::private_key(&mut key_pem_bytes.as_slice())
-                    .with_context(|| {
-                        format!("failed to parse key PEM: {}", key_path.display())
-                    })?
+                    .with_context(|| format!("failed to parse key PEM: {}", key_path.display()))?
                     .ok_or_else(|| {
                         anyhow::anyhow!("no private key found in {}", key_path.display())
                     })?;
@@ -211,8 +207,8 @@ pub(super) fn generate_webtransport_self_signed(
 ) -> Result<rcgen::CertifiedKey<rcgen::KeyPair>> {
     use time::{Duration, OffsetDateTime};
 
-    let mut params = rcgen::CertificateParams::new(sans)
-        .context("rcgen CertificateParams の生成に失敗")?;
+    let mut params =
+        rcgen::CertificateParams::new(sans).context("rcgen CertificateParams の生成に失敗")?;
     let now = OffsetDateTime::now_utc();
     // clock skew 対策で not_before は 1h 前倒し、 not_after は 13 日後
     // (= spec 上限 14 日に対して余裕を持たせる)。

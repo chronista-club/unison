@@ -24,10 +24,7 @@ pub fn make_event(method: &str, payload: serde_json::Value) -> ProtocolMessage {
 
 /// テスト用 ServerIdentity を構築
 #[allow(dead_code)]
-pub fn make_identity(
-    name: &str,
-    channels: &[&str],
-) -> unison::network::identity::ServerIdentity {
+pub fn make_identity(name: &str, channels: &[&str]) -> unison::network::identity::ServerIdentity {
     use unison::network::identity::*;
     let mut identity = ServerIdentity::new(name, "0.1.0", "test");
     for ch in channels {

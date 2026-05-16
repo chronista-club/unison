@@ -77,10 +77,7 @@ fn test_typescript_codegen_stream_channel() {
         code.contains("backend: \"stream\""),
         "metadata backend=stream"
     );
-    assert!(
-        code.contains("from: \"client\""),
-        "metadata from=client"
-    );
+    assert!(code.contains("from: \"client\""), "metadata from=client");
     assert!(
         code.contains("lifetime: \"persistent\""),
         "metadata lifetime=persistent"
@@ -169,10 +166,7 @@ fn test_typescript_codegen_datagram_channel() {
         "metadata backend=datagram"
     );
     assert!(code.contains("channelId: 1"), "metadata channelId=1");
-    assert!(
-        code.contains("from: \"server\""),
-        "metadata from=server"
-    );
+    assert!(code.contains("from: \"server\""), "metadata from=server");
 
     // Datagram channel は requests 空
     assert!(

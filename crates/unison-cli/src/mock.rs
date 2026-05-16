@@ -121,9 +121,7 @@ async fn handle_channel(
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
                 tracing::info!(channel = %chan_name, method = %msg.method, "mock stub reply");
-                channel
-                    .send_response(msg.id, &msg.method, &reply)
-                    .await?;
+                channel.send_response(msg.id, &msg.method, &reply).await?;
             }
             Ok(msg) => {
                 // Event 等 — mock は受け流すだけ

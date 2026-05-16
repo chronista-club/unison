@@ -184,11 +184,7 @@ impl WebTransportServer {
         let cert_hash = digest.fmt(wtransport::tls::Sha256DigestFmt::BytesArray);
         // TS SDK 向けの区切り無し 64 文字 hex。 ブラウザの
         // `serverCertificateHashes` は leaf 証明書 DER 全体の SHA-256 を取る。
-        let cert_hash_hex: String = digest
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let cert_hash_hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
 
         let config = ServerConfig::builder()
             .with_bind_address(addr)
@@ -383,7 +379,9 @@ mod tests {
 
         // ephemeral port (= 0) に bind。
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        wt.bind(addr).await.expect("WebTransport bind は成功するべき");
+        wt.bind(addr)
+            .await
+            .expect("WebTransport bind は成功するべき");
 
         // bind 後は local_addr と cert hash が取れる。
         let local = wt.local_addr().expect("local_addr が取れるべき");

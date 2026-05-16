@@ -21,10 +21,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use unison::ProtocolServer;
+use unison::network::quic::UnisonStream;
 use unison::network::webtransport::WebTransportServer;
 use unison::network::{MessageType, UnisonChannel};
-use unison::network::quic::UnisonStream;
-use unison::ProtocolServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +37,9 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "[::1]:4433".to_string());
+    let addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "[::1]:4433".to_string());
 
     // ── channel 登録 ─────────────────────────────────────────
     let server = ProtocolServer::with_identity(
@@ -48,16 +50,18 @@ async fn main() -> Result<()> {
 
     // echo channel: request/response。 `Echo` request の `text` をそのまま返す。
     server
-        .register_channel("echo", |_ctx, stream| async move {
-            handle_echo(stream).await
-        })
+        .register_channel(
+            "echo",
+            |_ctx, stream| async move { handle_echo(stream).await },
+        )
         .await;
 
     // clock channel: event push。 open 後に `Tick` event を 200ms 間隔で 3 回送る。
     server
-        .register_channel("clock", |_ctx, stream| async move {
-            handle_clock(stream).await
-        })
+        .register_channel(
+            "clock",
+            |_ctx, stream| async move { handle_clock(stream).await },
+        )
         .await;
 
     // ── WebTransport ingress 起動 ────────────────────────────
@@ -83,7 +87,9 @@ async fn main() -> Result<()> {
     std::io::stdout().flush().ok();
 
     // 終了までブロック。
-    wt.start().await.context("WebTransport server の実行に失敗")?;
+    wt.start()
+        .await
+        .context("WebTransport server の実行に失敗")?;
     Ok(())
 }
 

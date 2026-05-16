@@ -41,11 +41,11 @@ pub async fn run(args: SniffArgs) -> Result<()> {
         .context("QUIC client init failed")?;
     let client = ProtocolClient::new(quic);
 
-    client
-        .connect(&args.url)
-        .await
-        .context("connect failed")?;
-    eprintln!("connected to {} — opening channel '{}'", args.url, args.channel);
+    client.connect(&args.url).await.context("connect failed")?;
+    eprintln!(
+        "connected to {} — opening channel '{}'",
+        args.url, args.channel
+    );
 
     let channel = client
         .open_channel(&args.channel)
@@ -56,7 +56,10 @@ pub async fn run(args: SniffArgs) -> Result<()> {
         "sniffing channel '{}' on {} — Ctrl-C to stop",
         args.channel, args.url
     );
-    println!("{:<10} {:>8} {:<9} {:<24} payload", "t(ms)", "id", "type", "method");
+    println!(
+        "{:<10} {:>8} {:<9} {:<24} payload",
+        "t(ms)", "id", "type", "method"
+    );
     println!("{}", "-".repeat(72));
 
     let start = Instant::now();

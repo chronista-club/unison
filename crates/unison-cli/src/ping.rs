@@ -79,10 +79,7 @@ async fn probe_once(args: &PingArgs) -> Result<Duration> {
     let client = ProtocolClient::new(quic);
 
     let start = Instant::now();
-    client
-        .connect(&args.url)
-        .await
-        .context("connect failed")?;
+    client.connect(&args.url).await.context("connect failed")?;
     let rtt = start.elapsed();
 
     let _ = client.disconnect().await;
