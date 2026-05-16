@@ -25,8 +25,19 @@ export {
 } from "./transport/errors.js";
 export { WebTransportClient, WebTransportConnection, connect } from "./transport/web_transport.js";
 
-// === Phase 2c: channel === (= 未実装、 placeholder)
-// export type { UnisonChannel, DatagramChannel } from "./channel/types.js";
+// === Phase 2c: channel ===
+export type {
+  ChannelMeta,
+  ChannelPayload,
+  DatagramChannel,
+  DatagramChannelMeta,
+  EventName,
+  RequestName,
+  UnisonChannel,
+} from "./channel/types.js";
+export { UnisonChannelImpl } from "./channel/unison_channel.js";
+export { DatagramChannelImpl } from "./channel/datagram_channel.js";
+export { DatagramDispatcher, DispatcherInner } from "./channel/dispatcher.js";
 
 // === Phase 2d: codec ===
 export type { Codec, CodecFormat } from "./codec/codec.js";
