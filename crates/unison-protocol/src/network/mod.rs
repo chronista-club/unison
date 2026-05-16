@@ -9,6 +9,7 @@ use crate::proto;
 pub mod cert;
 pub mod channel;
 pub mod client;
+pub mod conn;
 pub mod context;
 pub mod datagram_channel;
 pub mod datagram_dispatcher;
@@ -20,6 +21,7 @@ pub mod trust;
 
 pub use cert::CertSource;
 pub use channel::UnisonChannel;
+pub use conn::UnisonConn;
 pub use client::{ClientConnectionEvent, ClientConnectionEventReceiver, ProtocolClient};
 pub use datagram_channel::DatagramChannel;
 pub use mesh::InternalMeshKeypair;

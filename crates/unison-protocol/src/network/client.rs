@@ -170,13 +170,14 @@ impl ProtocolClient {
             .map_err(|e| NetworkError::Protocol(format!("Failed to send channel open: {}", e)))?;
 
         // UnisonStreamを作成してUnisonChannelでラップ
-        let conn_arc = Arc::new(connection.clone());
+        // quinn のストリームを transport 非依存の trait object へ box する。
+        let conn_arc: Arc<dyn super::conn::UnisonConn> = Arc::new(connection.clone());
         let stream = UnisonStream::from_streams(
             request_id,
             format!("__channel:{}", channel_name),
             conn_arc,
-            send_stream,
-            recv_stream,
+            Box::new(send_stream),
+            Box::new(recv_stream),
         );
 
         // コンテキストにチャネルを登録
@@ -221,7 +222,7 @@ impl ProtocolClient {
         let connection = connection_guard
             .as_ref()
             .ok_or(NetworkError::NotConnected)?;
-        let connection_arc = Arc::new(connection.clone());
+        let connection_arc: Arc<dyn super::conn::UnisonConn> = Arc::new(connection.clone());
         drop(connection_guard);
 
         // Datagram dispatcher を lazy spawn

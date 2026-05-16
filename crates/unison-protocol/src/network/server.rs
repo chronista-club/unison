@@ -163,7 +163,10 @@ pub struct ProtocolServer {
     /// Datagram channel handlers (v0.10.0 で追加、 name → channel_id + handler)
     datagram_channel_handlers: Arc<RwLock<HashMap<String, DatagramHandlerEntry>>>,
     /// Active connections (= broadcast 配信先、 remote_addr → Connection)
-    active_connections: Arc<RwLock<HashMap<SocketAddr, Arc<quinn::Connection>>>>,
+    ///
+    /// transport 非依存。 raw QUIC / WebTransport どちらの接続も
+    /// [`UnisonConn`](super::conn::UnisonConn) trait object として保持する。
+    active_connections: Arc<RwLock<HashMap<SocketAddr, Arc<dyn super::conn::UnisonConn>>>>,
     /// 接続イベント broadcast チャネル（複数サブスクライバ対応）
     connection_event_tx: tokio::sync::broadcast::Sender<ConnectionEvent>,
 }
@@ -316,6 +319,7 @@ impl ProtocolServer {
             }
         }
         Ok(success)
+        // 注: datagram は best-effort。 transport を問わず失敗は warn のみで継続。
     }
 
     /// Datagram handler の snapshot を取得 (= quic.rs::handle_connection 用、 内部 API)
@@ -333,7 +337,7 @@ impl ProtocolServer {
     pub(crate) async fn add_active_connection(
         &self,
         remote_addr: SocketAddr,
-        connection: Arc<quinn::Connection>,
+        connection: Arc<dyn super::conn::UnisonConn>,
     ) {
         self.active_connections
             .write()
